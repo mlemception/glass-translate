@@ -111,9 +111,9 @@ variables help with scripting: `GLASSTRANSLATE_CONFIG=<path>` overrides the sett
 
 * **Control window**: a normal window with all settings (languages, OCR engine and device,
   translation backend, API URL/key for LibreTranslate, models directory and download button,
-  overlay opacity, refresh rate, debounce, font, hotkeys, hide-original), Start/Stop, "Grab
-  mode", "Show/Hide glass" and a live latency readout (per-stage ms, FPS, segments, cache hit
-  rate, devices).
+  overlay opacity, refresh rate, debounce, font, hotkeys, hide-original, manga mode,
+  uppercase), Start/Stop, "Grab mode", "Show/Hide glass" and a live latency readout
+  (per-stage ms, FPS, segments and blocks, cache hit rate, devices).
 * **Glass overlay**: a frameless, always-on-top, click-through window. Whatever is under it is
   translated in place. In *grab mode* it stops being click-through and shows a border with
   handles: drag anywhere to move, drag the bottom-right corner to resize, press `Escape` or
@@ -143,6 +143,67 @@ A corrupt file is ignored and defaults are used. Notable defaults: source langua
 target `de`, OCR device `auto` (DirectML, then CPU), translation backend `argos`, translate
 device `auto` (CUDA if available, else CPU), overlay opacity 0.10, refresh 10 Hz, debounce
 120 ms, minimum OCR confidence 0.5.
+
+## Manga mode and typesetting
+
+`manga_mode` (default on; "Manga mode (group bubbles, comic lettering)" in the control
+window) switches the pipeline from one translation per OCR line to *blocks*, the way a
+professional English edition is lettered. The same code path serves the live glass and the
+`demo/typeset_page.py` script, so the demo output is a faithful preview of the overlay.
+
+1. **Blocks** (`render/layout.py`, `build_blocks`). Raw OCR lines are first cleaned of
+   furigana (small kana-only lines hugging a larger line are dropped from the text but still
+   erased). Lines of the same orientation and glyph size that sit on the same patch of paper
+   are grouped; vertical columns are read right to left, horizontal lines top to bottom, so a
+   block's text is the whole utterance. That string is what gets translated, which is far
+   better than translating each column on its own.
+2. **Bubble detection**. The paper around the block is flood-filled with the text painted
+   over. When the enclosing light (or dark) region is bubble-sized, the block is typeset
+   inside the bubble's outline: the layout region is the bubble eroded by a margin, and the
+   flow algorithm (`render/typeset.py`) uses the region's row spans so lines get shorter
+   towards the top and bottom of an oval. Otherwise the block is *free text* over artwork or
+   a caption on flat paper.
+3. **Erase**. Inside a bubble the original glyphs are painted out with the paper colour. Over
+   artwork only the glyph strokes are removed (pixels nearer the text colour than the
+   background, inpainted), so screentone and line art between the letters survive; no white
+   box is drawn.
+4. **Lettering**. The translation is upper-cased (`uppercase`, default on), flowed at the
+   largest size at or below a ceiling derived from the source glyph height (so all blocks on
+   a page share a scale), hyphenated only when a word cannot fit a line, and the lines are
+   balanced so a bubble reads as a centred oval. Text over artwork gets a halo (a stroke in
+   the background colour, 0.12 em wide) for legibility. Dialogue is set in bold italic;
+   flat captions stay upright.
+5. **Live glass**. The pipeline emits one segment per block (`style.is_block`), carrying the
+   layout region, the erased patch and the halo flag. The overlay paints the patch at its
+   frame position, then runs the same `typeset()` with a `QFontMetricsF` measurer of the
+   same font, scaled by the device pixel ratio, so placement matches the PIL demo output.
+   Change detection works on block footprints: a dirty tile touching a block drops it and
+   re-OCRs a crop grown to the whole bubble plus 64 px, so bubbles are never read in halves.
+   Unknown-token markers a weak model emits (`<unk>`, `⁇`) are stripped; a translation
+   that is nothing but markers shows the source text instead.
+
+With `manga_mode` off, every OCR line is styled and translated on its own and drawn in the
+configured font family as before (vertical columns rotated 90 degrees).
+
+### Fonts
+
+Blocks are lettered in **Comic Neue** (Bold and Bold Italic), bundled in
+`glasstranslate/render/fonts/` under the SIL Open Font License 1.1 (`OFL.txt` alongside the
+files). The demo uses it through PIL, the overlay registers it with `QFontDatabase` at startup.
+The "Font" setting only affects non-block segments.
+
+### Typesetting a page from the command line
+
+```bat
+.venv\Scripts\python demo\typeset_page.py Examples\before.jpg --out demo\output
+```
+
+Writes `demo/output/before_typeset.png` (the lettered page) and `before_blocks.png` (source
+lines in green, furigana in grey, bubble regions in blue, layout boxes in red, block index
+with `B` for bubble and `O` for outlined free text). `Examples/after.webp` is a professional
+English edition of the same page for comparison. Flags: `--backend argos|identity`,
+`--device`, `--src`, `--tgt`, `--models`, `--min-confidence`, `--no-upper` (keep the
+translation's case).
 
 ## Demo (no GUI needed)
 
@@ -191,8 +252,9 @@ this small the CPU is as fast as CUDA.
 ```
 
 Tests need no GPU, models, network or display. They cover colour and angle measurement,
-text fitting, the translation cache and factory, change detection, language detection and
-the demo helpers.
+text fitting, the translation cache and factory, change detection, language detection, the
+manga-mode pipeline (block emission, dirty-rect growth, unknown-token cleanup, config
+persistence; `tests/test_pipeline_blocks.py`) and the demo helpers.
 
 ## How to add a translation backend
 
@@ -238,12 +300,15 @@ Shipped backends: `argos` (offline, CTranslate2), `libretranslate` (online), `id
 * **Fit, not overflow.** Translations longer than the original are wrapped (up to 3 lines)
   and shrunk to fit the original quad, down to a minimum size, rather than spilling over
   neighbouring text. Very short boxes with long translations become small.
-* **Vertical text.** A vertical segment whose translation is CJK is rendered as a column of
-  stacked characters. When the translation is a spaced script (Japanese manga to English) the
+* **Vertical text outside manga mode.** A vertical segment whose translation is CJK is
+  rendered as a column of stacked characters. When the translation is a spaced script the
   text is laid out horizontally along the column, wrapped to the column height in up to six
-  lines, and rotated 90° clockwise so it reads top to bottom. Wide bubbles with several
-  columns are still one segment per column; the translations of adjacent columns are
-  independent, so a sentence split across columns is translated in pieces.
+  lines, and rotated 90° clockwise so it reads top to bottom. Columns are translated
+  independently; enable manga mode to translate a bubble as one utterance.
+* **Manga mode heuristics.** Bubble detection is a flood fill of the paper, so a bubble
+  whose outline is broken, or text that touches the outline, is treated as free text. Blocks
+  are grouped by proximity and glyph size; two bubbles that touch can merge into one block.
+  Stroke-only erasing over dense artwork can leave faint traces of the original glyphs.
 * **Short interjections** (single-word shouts, sound effects) are where translation models
   are weakest. When a model returns nothing usable (empty or all `<unk>`), the original text
   is shown instead of a blank box, and the failure is not cached so a better model installed

@@ -174,6 +174,8 @@ class ControlWindow(QMainWindow):
             self.confidence_spin.setValue(cfg.min_confidence)
             self.font_combo.setCurrentFont(QFont(cfg.font_family))
             self.hide_original_check.setChecked(cfg.hide_original)
+            self.manga_mode_check.setChecked(cfg.manga_mode)
+            self.uppercase_check.setChecked(cfg.uppercase)
             self.hotkey_grab_edit.setText(cfg.hotkeys.toggle_grab)
             self.hotkey_running_edit.setText(cfg.hotkeys.toggle_running)
             self.hotkey_hidden_edit.setText(cfg.hotkeys.toggle_hidden)
@@ -196,7 +198,9 @@ class ControlWindow(QMainWindow):
             f"style {stats.style_ms:.1f} | translate {stats.translate_ms:.1f}"
         )
         skipped = " (unchanged)" if stats.skipped_unchanged else ""
-        self.segments_label.setText(f"{stats.segments} live, {stats.dirty_regions} dirty{skipped}")
+        blocks = stats.extra.get("blocks")
+        blocks_txt = f", {blocks} blocks" if isinstance(blocks, int) else ""
+        self.segments_label.setText(f"{stats.segments} live{blocks_txt}, {stats.dirty_regions} dirty{skipped}")
         rate = stats.extra.get("cache_hit_rate")
         rate_txt = f"{rate * 100:.0f}%" if isinstance(rate, (int, float)) else "-"
         self.cache_label.setText(f"{stats.cache_hits} hit / {stats.cache_misses} miss, {rate_txt} overall")
@@ -327,12 +331,24 @@ class ControlWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_value)
         self.font_combo = QFontComboBox()
         self.hide_original_check = QCheckBox("Paint background-coloured box under the translation")
+        self.manga_mode_check = QCheckBox("Manga mode (group bubbles, comic lettering)")
+        self.manga_mode_check.setToolTip(
+            "Group the columns of a speech bubble into one block, translate the whole "
+            "utterance, erase the original and letter the translation in the bundled "
+            "Comic Neue font, flowed to the bubble outline."
+        )
+        self.uppercase_check = QCheckBox("Uppercase")
+        self.uppercase_check.setToolTip("Letter manga-mode blocks in capitals, as printed English comics do.")
         form.addRow("Background opacity", opacity_row)
         form.addRow("Font", self.font_combo)
         form.addRow("Hide original", self.hide_original_check)
+        form.addRow("Typesetting", self.manga_mode_check)
+        form.addRow("", self.uppercase_check)
         self.opacity_slider.valueChanged.connect(self._on_edit)
         self.font_combo.currentFontChanged.connect(self._on_edit)
         self.hide_original_check.toggled.connect(self._on_edit)
+        self.manga_mode_check.toggled.connect(self._on_edit)
+        self.uppercase_check.toggled.connect(self._on_edit)
         return box
 
     def _build_pipeline_group(self) -> QGroupBox:
@@ -462,6 +478,8 @@ class ControlWindow(QMainWindow):
         cfg.min_confidence = float(self.confidence_spin.value())
         cfg.font_family = self.font_combo.currentFont().family()
         cfg.hide_original = self.hide_original_check.isChecked()
+        cfg.manga_mode = self.manga_mode_check.isChecked()
+        cfg.uppercase = self.uppercase_check.isChecked()
         cfg.hotkeys.toggle_grab = self._read_hotkey(self.hotkey_grab_edit, cfg.hotkeys.toggle_grab)
         cfg.hotkeys.toggle_running = self._read_hotkey(self.hotkey_running_edit, cfg.hotkeys.toggle_running)
         cfg.hotkeys.toggle_hidden = self._read_hotkey(self.hotkey_hidden_edit, cfg.hotkeys.toggle_hidden)

@@ -8,6 +8,18 @@ the dominant source language, translates the cache misses in one batch and
 hands the complete set of *live* segments to ``on_result`` together with a
 :class:`~glasstranslate.core.types.PipelineStats` latency breakdown.
 
+Manga mode (``cfg.manga_mode``)
+-------------------------------
+Instead of styling every OCR line on its own, the new lines are handed to
+:func:`glasstranslate.render.layout.build_blocks`, which strips furigana,
+groups the columns of one bubble into a *block* and detects the bubble
+outline.  Each block becomes one live segment whose ``style.is_block`` is
+True: its text is the whole utterance (translated as one string) and its
+style carries the layout region and the erased ``clean_patch`` the renderer
+paints under the lettering.  Dirty rectangles are grown more generously so a
+crop always contains whole bubbles, and a block is dropped and re-read
+whenever a change touches its footprint (source lines or erased patch).
+
 Threading model
 ---------------
 Everything except the constructor, :meth:`set_config`, :meth:`pause`,
@@ -31,7 +43,7 @@ from ..capture.diff import ChangeDetector
 from ..config.settings import AppConfig
 from ..translate.cache import TranslationCache
 from .interfaces import LanguageDetector, OCREngine, ScreenCapture, Translator
-from .types import Frame, PipelineStats, Rect, Segment, StyledSegment, TranslatedSegment
+from .types import Frame, PipelineStats, Rect, Segment, SegmentStyle, StyledSegment, TranslatedSegment
 
 __all__ = ["Pipeline", "ResultCallback", "StatusCallback"]
 
@@ -43,6 +55,9 @@ StatusCallback = Callable[[str], None]
 # Dirty rectangles are grown by this many frame pixels before OCR so text that
 # straddles a tile boundary is recognised whole.
 _DIRTY_EXPAND_PX = 32
+# In manga mode the crop must also hold the whole speech bubble around the
+# text (bubble detection flood-fills the paper), so it is grown further.
+_BLOCK_EXPAND_PX = 64
 # ``ChangeDetector.fraction_changed`` above this means scroll/video: debounce.
 _STORM_FRACTION = 0.4
 # A debounce frame counts as "stable" below this changed fraction.
@@ -71,6 +86,7 @@ _TRANSLATOR_FIELDS = (
 )
 _DETECTOR_FIELDS = ("tile_size", "change_threshold")
 _LANGUAGE_FIELDS = ("source_lang", "target_lang")
+_LAYOUT_FIELDS = ("manga_mode",)
 
 
 def _default_capture_factory(cfg: AppConfig) -> ScreenCapture:
@@ -97,26 +113,43 @@ def _default_detector_factory() -> LanguageDetector:
     return ScriptLanguageDetector()
 
 
-_UNK_MARKERS = ("<unk>", "\u2047")  # sentencepiece / ctranslate2 unknown-token renderings
+_UNK_MARKERS = ("<unk>", "⁇")  # sentencepiece / ctranslate2 unknown-token renderings
 
 
-def _usable_translation(text: str) -> bool:
-    """False when a model produced nothing but unknown tokens or punctuation."""
-    stripped = text.strip()
-    if not stripped:
-        return False
+def clean_translation(text: str) -> str:
+    """Drop unknown-token markers a model emits for words it has no
+    vocabulary for, and collapse the whitespace left behind.  Returns an empty
+    string when nothing but markers and punctuation remains, so the caller
+    can fall back to the source text instead of typesetting ``⁇``."""
+    cleaned = text
     for marker in _UNK_MARKERS:
-        stripped = stripped.replace(marker, "")
-    return bool(stripped.strip(" .\u2026,!?"))
+        cleaned = cleaned.replace(marker, " ")
+    cleaned = " ".join(cleaned.split())
+    if not cleaned.strip(" .…,!?"):
+        return ""
+    return cleaned
 
 
-def _offset_segment(seg: TranslatedSegment, dx: int, dy: int) -> TranslatedSegment:
+def _footprint(seg: TranslatedSegment) -> Rect:
+    """The frame area a live segment depends on: its quad plus, for typeset
+    blocks, the layout region (the whole bubble) and the erased patch painted
+    under the lettering.  A crop that re-reads the block must cover all of it
+    so the bubble is flood-filled whole."""
+    box = seg.styled.segment.bbox
+    for extra in (seg.style.layout_box, seg.style.clean_rect):
+        if extra is not None:
+            box = box.union(extra)
+    return box
+
+
+def _offset_translated(seg: TranslatedSegment, dx: int, dy: int) -> TranslatedSegment:
+    """Copy of ``seg`` with every frame coordinate (quad and style) moved."""
     inner = seg.styled.segment
     moved = Segment(
         inner.text, inner.quad + np.array([dx, dy], dtype=np.float32), inner.confidence, inner.lang_hint
     )
     return TranslatedSegment(
-        styled=StyledSegment(moved, seg.styled.style, seg.styled.src_lang),
+        styled=StyledSegment(moved, seg.styled.style.shifted(dx, dy), seg.styled.src_lang),
         translation=seg.translation,
         tgt_lang=seg.tgt_lang,
         from_cache=seg.from_cache,
@@ -148,6 +181,7 @@ def _merge_rects(rects: Sequence[Rect]) -> List[Rect]:
 
 
 def _offset_segment(seg: Segment, dx: int, dy: int) -> Segment:
+    """Copy of an OCR ``seg`` moved from crop to frame coordinates."""
     quad = seg.quad.copy()
     quad[:, 0] += dx
     quad[:, 1] += dy
@@ -375,7 +409,10 @@ class Pipeline(threading.Thread):
         new_segments = self._ocr_crops(frame, crops)
         stats.ocr_ms = timer.lap()
 
-        styled = self._style_and_detect(frame, new_segments)
+        block_styles: Optional[List[SegmentStyle]] = None
+        if self._cfg.manga_mode:
+            new_segments, block_styles = self._group_blocks(frame, new_segments)
+        styled = self._style_and_detect(frame, new_segments, block_styles)
         stats.style_ms = timer.lap()
 
         hits0, misses0 = self.cache.hits, self.cache.misses
@@ -413,7 +450,7 @@ class Pipeline(threading.Thread):
                 self._rebuild_change_detector = True
             if any(
                 getattr(old, f) != getattr(new, f)
-                for f in _OCR_FIELDS + _TRANSLATOR_FIELDS + _DETECTOR_FIELDS + _LANGUAGE_FIELDS
+                for f in _OCR_FIELDS + _TRANSLATOR_FIELDS + _DETECTOR_FIELDS + _LANGUAGE_FIELDS + _LAYOUT_FIELDS
             ):
                 self._invalidate_requested = True
             self._next_engine_attempt = 0.0
@@ -495,9 +532,13 @@ class Pipeline(threading.Thread):
 
     def _plan_crops(self, dirty: Sequence[Rect], width: int, height: int) -> List[Rect]:
         """Expanded, merged OCR crops for ``dirty``; grown to cover any live
-        segment they touch so that segment is re-read whole."""
-        crops = _merge_rects([_expand(r, _DIRTY_EXPAND_PX, width, height) for r in dirty])
-        live_boxes = [seg.styled.segment.bbox for seg in self._live.values()]
+        segment they touch so that segment is re-read whole.  In manga mode
+        the growth is larger (whole bubbles must fit) and a touched block is
+        covered together with its bubble-sized surroundings."""
+        manga = self._cfg.manga_mode
+        expand = _BLOCK_EXPAND_PX if manga else _DIRTY_EXPAND_PX
+        crops = _merge_rects([_expand(r, expand, width, height) for r in dirty])
+        live_boxes = [_footprint(seg) for seg in self._live.values()]
         # Growing a crop can make it touch further live segments, so iterate
         # to a fixed point: every segment that gets dropped is then fully
         # inside some crop and is re-read whole.
@@ -506,7 +547,8 @@ class Pipeline(threading.Thread):
             for crop in crops:
                 for bbox in live_boxes:
                     if bbox.intersects(crop):
-                        crop = crop.union(bbox).clamp(width, height)
+                        covered = _expand(bbox, expand, width, height) if manga else bbox
+                        crop = crop.union(covered).clamp(width, height)
                 grown.append(crop)
             grown = _merge_rects(grown)
             if grown == crops:
@@ -519,9 +561,7 @@ class Pipeline(threading.Thread):
 
     def _drop_live_intersecting(self, crops: Sequence[Rect]) -> None:
         doomed = [
-            key
-            for key, seg in self._live.items()
-            if any(seg.styled.segment.bbox.intersects(c) for c in crops)
+            key for key, seg in self._live.items() if any(_footprint(seg).intersects(c) for c in crops)
         ]
         for key in doomed:
             del self._live[key]
@@ -537,7 +577,27 @@ class Pipeline(threading.Thread):
                 found.append(_offset_segment(seg, crop.x, crop.y))
         return found
 
-    def _style_and_detect(self, frame: Frame, segments: Sequence[Segment]) -> List[StyledSegment]:
+    def _group_blocks(
+        self, frame: Frame, segments: Sequence[Segment]
+    ) -> tuple[List[Segment], List[SegmentStyle]]:
+        """Manga mode: merge the raw OCR lines into typeset blocks.  Returns
+        one :class:`Segment` per block (the whole utterance; quad = union of
+        its lines) and, aligned with it, the typesetting style the renderer
+        needs (layout region, clean patch, halo flag...)."""
+        from ..render.layout import build_blocks
+
+        blocks = build_blocks(frame.image, segments) if segments else []
+        return [b.segment for b in blocks], [b.style for b in blocks]
+
+    def _style_and_detect(
+        self,
+        frame: Frame,
+        segments: Sequence[Segment],
+        styles: Optional[Sequence[SegmentStyle]] = None,
+    ) -> List[StyledSegment]:
+        """Attach a source language and a style to every segment.  ``styles``
+        (aligned with ``segments``) supplies pre-computed block styles; when
+        None the style is measured from the pixels under each quad."""
         if not segments:
             return []
         from ..render.style import measure_style
@@ -557,13 +617,14 @@ class Pipeline(threading.Thread):
         self._last_src = dominant
 
         styled: List[StyledSegment] = []
-        for seg in segments:
+        for i, seg in enumerate(segments):
             lang = dominant
             if cfg.source_lang == "auto":
                 own = self._lang_detector.detect(seg.text)
                 if own in _SCRIPT_LANGUAGES and own != dominant:
                     lang = own
-            styled.append(StyledSegment(segment=seg, style=measure_style(frame.image, seg), src_lang=lang))
+            style = styles[i] if styles is not None else measure_style(frame.image, seg)
+            styled.append(StyledSegment(segment=seg, style=style, src_lang=lang))
         return styled
 
     def _translate(self, styled: Sequence[StyledSegment]) -> List[TranslatedSegment]:
@@ -591,10 +652,9 @@ class Pipeline(threading.Thread):
                 translations = texts
             for i, translation in zip(indices, translations):
                 source = styled[i].segment.text
-                if not _usable_translation(translation):
-                    # Nothing sensible came back (empty / all <unk>): show the
-                    # original rather than blanking the text out.
-                    translation = source
+                translation = clean_translation(translation) or source
+                # An empty result (nothing but <unk>) shows the original
+                # rather than blanking the text out.
                 if translation != source:
                     # Backends return the input unchanged when they cannot
                     # translate.  Never cache that, so a model installed later
@@ -606,6 +666,7 @@ class Pipeline(threading.Thread):
     def _fill_common_stats(self, stats: PipelineStats) -> None:
         stats.extra.update(
             src_lang=self._last_src,
+            blocks=sum(1 for s in self._live.values() if s.style.is_block),
             cache_size=len(self.cache),
             cache_hit_rate=round(self.cache.stats()["hit_rate"], 3),
         )
@@ -615,7 +676,7 @@ class Pipeline(threading.Thread):
         segments = list(self._live.values())
         dx, dy = self._frame_offset
         if dx or dy:
-            segments = [_offset_segment(s, dx, dy) for s in segments]
+            segments = [_offset_translated(s, dx, dy) for s in segments]
         try:
             self._on_result(segments, stats)
         except Exception:  # pragma: no cover - UI callback bug must not kill us

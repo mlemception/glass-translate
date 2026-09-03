@@ -18,14 +18,26 @@ Rotation sign: :func:`glasstranslate.render.style.quad_angle_deg` is
 counter-clockwise-positive on screen, while ``QPainter.rotate`` is clockwise
 for positive angles in Qt's y-down coordinates, so the painter rotates by
 ``-angle_deg``.
+
+Typeset blocks
+--------------
+Segments whose ``style.is_block`` is set (manga mode) are drawn the way the
+PIL renderer :func:`glasstranslate.render.compose.compose` draws them: the
+block's ``clean_patch`` (the frame with the original glyphs erased) is
+painted at ``clean_rect``, then the translation is flowed through the bubble
+outline with the shared :func:`glasstranslate.render.typeset.typeset` and a
+``QFontMetricsF`` measurer of the same bundled Comic Neue font.  The whole
+block is laid out in *frame* pixels under a ``1/dpr`` painter scale, so its
+placement is identical to the demo output at any DPI.
 """
 from __future__ import annotations
 
 import ctypes
+import logging
+import os
+import sys
 import threading
 import unicodedata
-import logging
-import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -34,10 +46,13 @@ from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, Slot, QTh
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
     QFontMetricsF,
+    QImage,
     QKeyEvent,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
     QPolygonF,
@@ -47,11 +62,13 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from ..core.types import Rect, TranslatedSegment
+from ..core.types import Rect, SegmentStyle, TranslatedSegment
+from ..render.compose import MANGA_FONT_PATH, typeset_block
 from ..render.fit import FitResult, Measure, fit_text
 from ..render.style import quad_text_height, quad_text_width
+from ..render.typeset import Typeset
 
-__all__ = ["GlassOverlay", "qt_measurer"]
+__all__ = ["GlassOverlay", "bgr_to_qimage", "load_manga_font", "make_font", "qt_measurer"]
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +88,21 @@ _MIN_W, _MIN_H = 120, 60
 _LINE_GAP = 0.1  # extra spacing between stacked characters, fraction of size
 _MIN_FONT_PX = 6.0
 _VERTICAL_MAX_LINES = 6  # a tall column translated to Latin may need many short lines
+# Halo around lettering that sits on artwork, as a fraction of the font size
+# (the same ratio the PIL renderer uses for its stroke width).
+_HALO_RATIO = 0.12
+# Comic Neue weights bundled next to the PIL renderer's default; registered
+# with Qt once per process.
+_MANGA_FONT_FILES = ("ComicNeue-Bold.ttf", "ComicNeue-BoldItalic.ttf")
+_MANGA_FONT_DIR = os.path.dirname(MANGA_FONT_PATH)
+_manga_font_family: Optional[str] = None
+
+
+def bgr_to_qimage(patch: np.ndarray) -> QImage:
+    """Deep-copy an ``HxWx3`` BGR array into a QImage that owns its pixels."""
+    rows, cols = patch.shape[:2]
+    data = np.ascontiguousarray(patch[:, :, :3], dtype=np.uint8)
+    return QImage(data.data, cols, rows, int(data.strides[0]), QImage.Format.Format_BGR888).copy()
 
 
 def stacks_vertically(text: str) -> bool:
@@ -106,19 +138,48 @@ def _hwnd(widget: QWidget) -> "_wt.HWND":
     return _wt.HWND(int(widget.winId()))
 
 
-def qt_measurer(family: str) -> Measure:
+def load_manga_font() -> Optional[str]:
+    """Register the bundled Comic Neue files with Qt (once) and return the
+    family name, or None when the files are missing or Qt rejected them.
+    Needs a ``QGuiApplication``."""
+    global _manga_font_family
+    if _manga_font_family is not None:
+        return _manga_font_family
+    for name in _MANGA_FONT_FILES:
+        path = os.path.join(_MANGA_FONT_DIR, name)
+        if not os.path.exists(path):
+            continue
+        font_id = QFontDatabase.addApplicationFont(path)
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        if families:
+            _manga_font_family = str(families[0])
+    if _manga_font_family is None:
+        log.warning("bundled comic font not available; typeset blocks use the overlay font")
+    return _manga_font_family
+
+
+def make_font(family: str, size: float, *, bold: bool = False, italic: bool = False) -> QFont:
+    """A ``family`` font at ``size`` pixels, unhinted so glyph advances scale
+    linearly with size (the flow algorithm relies on that)."""
+    font = QFont(family)
+    font.setPixelSize(max(1, int(round(size))))
+    font.setBold(bold)
+    font.setItalic(italic)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    return font
+
+
+def qt_measurer(family: str, *, bold: bool = False, italic: bool = False) -> Measure:
     """A :data:`~glasstranslate.render.fit.Measure` for ``family`` based on
-    ``QFontMetricsF``.  ``size`` is the font pixel size; results are logical
-    pixels.  Fonts and metrics are cached per rounded size."""
+    ``QFontMetricsF``.  ``size`` is the font pixel size; results are in the
+    same pixel unit.  Fonts and metrics are cached per rounded size."""
     cache: Dict[int, QFontMetricsF] = {}
 
     def metrics(size: float) -> QFontMetricsF:
         px = max(1, int(round(size)))
         fm = cache.get(px)
         if fm is None:
-            font = QFont(family)
-            font.setPixelSize(px)
-            fm = QFontMetricsF(font)
+            fm = QFontMetricsF(make_font(family, px, bold=bold, italic=italic))
             cache[px] = fm
         return fm
 
@@ -162,14 +223,18 @@ class GlassOverlay(QWidget):
         self.setWindowTitle("GlassTranslate glass")
 
         self._segments: List[TranslatedSegment] = []
+        self._patches: Dict[int, QImage] = {}  # clean patches of the current blocks, by index
         self._opacity = 0.1
         self._font_family = "Segoe UI"
         self._hide_original = True
+        self._uppercase = True
         self._click_through = True
         self._grab_mode = False
         self._drag: Optional[_Drag] = None
         self._native_ready = False
         self._measure: Measure = qt_measurer(self._font_family)
+        self._block_family = load_manga_font() or self._font_family
+        self._block_measure: Measure = qt_measurer(self._block_family, bold=True)
         self._segments_changed.connect(self._apply_segments, Qt.ConnectionType.QueuedConnection)
 
     # ------------------------------------------------------------ properties
@@ -202,6 +267,11 @@ class GlassOverlay(QWidget):
 
     def set_hide_original(self, hide: bool) -> None:
         self._hide_original = bool(hide)
+        self.update()
+
+    def set_uppercase(self, uppercase: bool) -> None:
+        """Letter typeset blocks in capitals (comic convention) or as translated."""
+        self._uppercase = bool(uppercase)
         self.update()
 
     def set_click_through(self, enabled: bool) -> None:
@@ -330,10 +400,23 @@ class GlassOverlay(QWidget):
         painter.fillRect(self.rect(), QColor(0, 0, 0, int(round(255 * alpha))))
 
         dpr = self.devicePixelRatioF() or 1.0
+        # Blocks first erase, then all draw (a later block's patch must not
+        # cover an earlier block's lettering), then the plain segments.
+        blocks = [(i, seg) for i, seg in enumerate(self._segments) if seg.style.is_block]
+        if self._hide_original:
+            for i, seg in blocks:
+                self._paint_clean_patch(painter, i, seg.style, dpr)
+        for _, seg in blocks:
+            try:
+                self._paint_block(painter, seg, dpr)
+            except Exception:  # one bad segment must not blank the glass
+                log.exception("failed to paint block %r", seg.source_text)
         for seg in self._segments:
+            if seg.style.is_block:
+                continue
             try:
                 self._paint_segment(painter, seg, dpr)
-            except Exception:  # one bad segment must not blank the glass
+            except Exception:
                 log.exception("failed to paint segment %r", seg.source_text)
 
         if self._grab_mode:
@@ -341,6 +424,65 @@ class GlassOverlay(QWidget):
         painter.end()
 
     # ---------------------------------------------------------- painting
+    def _paint_clean_patch(self, painter: QPainter, index: int, style: SegmentStyle, dpr: float) -> None:
+        image = self._patches.get(index)
+        rect = style.clean_rect
+        if image is None or rect is None:
+            return
+        painter.drawImage(QRectF(rect.x / dpr, rect.y / dpr, rect.w / dpr, rect.h / dpr), image)
+
+    def _paint_block(self, painter: QPainter, seg: TranslatedSegment, dpr: float) -> None:
+        """Flow the translation through the block's layout region and letter
+        it in the comic font, with a halo when it sits on artwork.  Everything
+        is computed in frame pixels; the painter is scaled by ``1/dpr``."""
+        text = seg.translation.strip()
+        if not text:
+            return
+        if self._uppercase:
+            text = text.upper()
+        style = seg.style
+        ts = typeset_block(text, style, self._block_measure)
+        if not ts.lines:
+            return
+        painter.save()
+        painter.scale(1.0 / dpr, 1.0 / dpr)
+        if abs(style.angle_deg) >= 0.5:
+            box = style.layout_box
+            assert box is not None
+            cx, cy = box.x + box.w / 2.0, box.y + box.h / 2.0
+            painter.translate(cx, cy)
+            painter.rotate(-style.angle_deg)
+            painter.translate(-cx, -cy)
+        # Dialogue (bubbles, free speech over art) is italic like printed
+        # comics; flat captions such as chapter titles stay upright.
+        italic = style.layout_mask is not None or style.outline
+        font = make_font(self._block_family, ts.size, bold=True, italic=italic)
+        self._draw_typeset(painter, ts, font, style)
+        painter.restore()
+
+    def _draw_typeset(self, painter: QPainter, ts: Typeset, font: QFont, style: SegmentStyle) -> None:
+        """Draw the placed lines of ``ts`` at their frame positions."""
+        ascent = QFontMetricsF(font).ascent()
+        halo: Optional[QPen] = None
+        if style.outline:
+            # A pen is centred on the glyph outline, so twice the PIL stroke
+            # width reaches the same distance outward.
+            halo = QPen(QColor(*style.bg), 2.0 * max(1.0, round(ts.size * _HALO_RATIO)))
+            halo.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            halo.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setFont(font)
+        for line in ts.lines:
+            x = line.cx - line.width / 2.0
+            baseline = line.top + ascent
+            if halo is not None:
+                path = QPainterPath()
+                path.addText(QPointF(x, baseline), font, line.text)
+                painter.setPen(halo)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(path)
+            painter.setPen(QColor(*style.fg))
+            painter.drawText(QPointF(x, baseline), line.text)
+
     def _paint_segment(self, painter: QPainter, seg: TranslatedSegment, dpr: float) -> None:
         quad = np.asarray(seg.quad, dtype=np.float64).reshape(4, 2) / dpr
         style = seg.style
@@ -473,4 +615,9 @@ class GlassOverlay(QWidget):
     @Slot(object)
     def _apply_segments(self, segments: object) -> None:
         self._segments = list(segments) if isinstance(segments, (list, tuple)) else []
+        self._patches = {
+            i: bgr_to_qimage(seg.style.clean_patch)
+            for i, seg in enumerate(self._segments)
+            if seg.style.is_block and seg.style.clean_patch is not None
+        }
         self.update()

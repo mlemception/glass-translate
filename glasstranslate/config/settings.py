@@ -62,6 +62,12 @@ class AppConfig:
     overlay_opacity: float = 0.10  # background alpha, 0..1
     hide_original: bool = True  # paint bg-colored box under translation
     font_family: str = "Segoe UI"
+    # Manga typesetting: group OCR lines into bubbles/blocks, translate the
+    # whole utterance and letter it in the bundled comic font (see
+    # render/layout.py).  Off = one translation per OCR line.
+    manga_mode: bool = True
+    # Letter typeset blocks in capitals, as printed English comics do.
+    uppercase: bool = True
     overlay: OverlayGeometry = field(default_factory=OverlayGeometry)
     # pipeline
     refresh_hz: float = 10.0  # capture polling rate
