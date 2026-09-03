@@ -49,7 +49,7 @@ class OverlayGeometry:
 class AppConfig:
     # languages
     source_lang: str = "auto"  # "auto" or ISO-639-1
-    target_lang: str = "de"
+    target_lang: str = "en"
     # engines
     ocr_engine: str = "rapidocr"
     ocr_device: str = "auto"  # auto | gpu | cpu
@@ -104,12 +104,25 @@ class AppConfig:
             if f.name not in data:
                 continue
             v = data[f.name]
-            if f.name == "hotkeys" and isinstance(v, dict):
-                cfg.hotkeys = Hotkeys(**{k: v[k] for k in v if k in Hotkeys.__dataclass_fields__})
-            elif f.name == "overlay" and isinstance(v, dict):
-                cfg.overlay = OverlayGeometry(
-                    **{k: int(v[k]) for k in v if k in OverlayGeometry.__dataclass_fields__}
-                )
-            else:
+            if f.name == "hotkeys":
+                if isinstance(v, dict):
+                    cfg.hotkeys = Hotkeys(
+                        **{k: str(v[k]) for k in v if k in Hotkeys.__dataclass_fields__}
+                    )
+                # Non-dict values are malformed: keep the defaults.
+            elif f.name == "overlay":
+                if isinstance(v, dict):
+                    try:
+                        cfg.overlay = OverlayGeometry(
+                            **{k: int(v[k]) for k in v if k in OverlayGeometry.__dataclass_fields__}
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            elif isinstance(v, type(getattr(cfg, f.name))) or (
+                isinstance(v, (int, float)) and isinstance(getattr(cfg, f.name), (int, float))
+                and not isinstance(v, bool)
+            ):
                 setattr(cfg, f.name, v)
+            # Values of the wrong type are ignored so a hand-edited config
+            # cannot put the app into an inconsistent state.
         return cfg
