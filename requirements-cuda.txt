@@ -1,0 +1,3 @@
+# Optional: NVIDIA CUDA runtime for CTranslate2 GPU translation (Windows/Linux)
+nvidia-cublas-cu12
+nvidia-cuda-runtime-cu12

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+models/*/
+models/*.argosmodel
+demo/output/
+.pytest_cache/
+*.egg-info/
+.claude/
