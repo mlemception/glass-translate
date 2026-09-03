@@ -78,13 +78,74 @@ class Segment:
 
 @dataclass
 class SegmentStyle:
-    """Visual style measured from the pixels under a segment."""
+    """Visual style measured from the pixels under a segment.
+
+    The first five fields describe the source text.  The remaining fields are
+    filled in by the typesetting layer (``render/layout.py``) when a segment
+    is a grouped *text block* rather than a raw OCR line; renderers fall back
+    to the plain per-quad behaviour when they are left at their defaults.
+    """
 
     fg: RGB
     bg: RGB
     angle_deg: float  # counter-clockwise positive, in [-90, 90)
     text_height_px: float  # height of the quad along its short axis
     vertical: bool = False  # True for top-to-bottom script layout
+    # --- typesetting (optional) -------------------------------------------
+    # Axis-aligned area (frame pixels) the translation may occupy.  For text
+    # inside a speech bubble this is the bubble's inscribed rectangle, which
+    # is usually much wider than the original columns; None = use the quad.
+    layout_box: Optional["Rect"] = None
+    # Boolean mask of shape (layout_box.h, layout_box.w): which pixels of the
+    # layout box are inside the bubble.  None = the whole box.
+    layout_mask: Optional[np.ndarray] = None
+    # Lay the translation out upright and horizontal regardless of the
+    # source orientation (manga: vertical Japanese -> horizontal English).
+    upright: bool = False
+    # BGR patch covering ``clean_rect`` that shows the frame with the
+    # original glyphs erased (filled with bg inside bubbles, inpainted over
+    # art).  Renderers paint it before the text instead of a solid box.
+    clean_patch: Optional[np.ndarray] = None
+    clean_rect: Optional["Rect"] = None
+    # Draw the text with a contrasting stroke (bg-coloured halo) because it
+    # sits on artwork rather than on a flat background.
+    outline: bool = False
+    # Font pixel size ceiling derived from the source glyph size so that all
+    # blocks on a page share a consistent scale; None = no ceiling.
+    max_font_px: Optional[float] = None
+    # Quads of the OCR lines this block was assembled from (N, 4, 2); used by
+    # debug views.  None for plain single-line segments.
+    source_quads: Optional[np.ndarray] = None
+
+    @property
+    def is_block(self) -> bool:
+        """True when the typesetting layer laid this segment out as a block."""
+        return self.layout_box is not None
+
+    def shifted(self, dx: int, dy: int) -> "SegmentStyle":
+        """Copy with every frame-coordinate field moved by ``(dx, dy)``."""
+        if not dx and not dy:
+            return self
+        delta = np.array([dx, dy], dtype=np.float32)
+        return SegmentStyle(
+            fg=self.fg,
+            bg=self.bg,
+            angle_deg=self.angle_deg,
+            text_height_px=self.text_height_px,
+            vertical=self.vertical,
+            layout_box=None if self.layout_box is None else Rect(
+                self.layout_box.x + dx, self.layout_box.y + dy, self.layout_box.w, self.layout_box.h
+            ),
+            layout_mask=self.layout_mask,
+            upright=self.upright,
+            clean_patch=self.clean_patch,
+            clean_rect=None if self.clean_rect is None else Rect(
+                self.clean_rect.x + dx, self.clean_rect.y + dy, self.clean_rect.w, self.clean_rect.h
+            ),
+            outline=self.outline,
+            max_font_px=self.max_font_px,
+            source_quads=None if self.source_quads is None else self.source_quads + delta,
+        )
 
 
 @dataclass

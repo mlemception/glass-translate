@@ -16,9 +16,14 @@ from typing import List, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from ..core.types import TranslatedSegment
+from ..core.types import Rect, TranslatedSegment
 from .fit import FitResult, Measure, fit_text
 from .style import quad_text_height, quad_text_width
+from .typeset import Typeset, mask_spans, rect_spans, typeset
+
+# Comic-style lettering font bundled with the package (SIL Open Font License).
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+MANGA_FONT_PATH = os.path.join(_FONT_DIR, "ComicNeue-Bold.ttf")
 
 # Candidate default fonts, best CJK coverage first.
 _DEFAULT_FONT_CANDIDATES = (
@@ -40,6 +45,11 @@ def default_font_path() -> Optional[str]:
         if os.path.exists(path):
             return path
     return None
+
+
+def manga_font_path() -> Optional[str]:
+    """The bundled comic lettering font used for typeset blocks, if present."""
+    return MANGA_FONT_PATH if os.path.exists(MANGA_FONT_PATH) else None
 
 
 @lru_cache(maxsize=256)
@@ -153,6 +163,66 @@ def _render_vertical_layer(
     return layer
 
 
+def block_spans(style, box: Rect) -> np.ndarray:
+    """Row spans for a block's layout region (bubble mask or plain box)."""
+    if style.layout_mask is not None and style.layout_mask.shape[:2] == (box.h, box.w):
+        return mask_spans(style.layout_mask, box)
+    return rect_spans(box)
+
+
+def typeset_block(text: str, style, measure: Measure, *, min_size: float = 7.0) -> Typeset:
+    """Typeset ``text`` into a block's layout region using its size ceiling."""
+    box = style.layout_box
+    assert box is not None
+    max_size = style.max_font_px or max(min_size, style.text_height_px * 0.7)
+    return typeset(text, block_spans(style, box), float(box.y), measure, max_size=max(max_size, min_size), min_size=min_size)
+
+
+def _draw_block(
+    canvas: Image.Image,
+    seg: TranslatedSegment,
+    font_path: Optional[str],
+    measure: Measure,
+    hide_original: bool,
+    uppercase: bool,
+) -> None:
+    """Render a typeset block: erase the original with its clean patch, then
+    flow the translation through the bubble/box outline, with a halo when the
+    text sits on artwork."""
+    style = seg.style
+    if hide_original and style.clean_patch is not None and style.clean_rect is not None:
+        r = style.clean_rect
+        patch = Image.fromarray(np.ascontiguousarray(style.clean_patch[:, :, ::-1])).convert("RGBA")
+        canvas.paste(patch, (r.x, r.y))
+    text = seg.translation.strip()
+    if not text:
+        return
+    if uppercase:
+        text = text.upper()
+    ts = typeset_block(text, style, measure)
+    if not ts.lines:
+        return
+    font = _font(font_path, ts.size)
+    stroke = max(1, int(round(ts.size * 0.12))) if style.outline else 0
+    box = style.layout_box
+    assert box is not None
+    if abs(style.angle_deg) < 0.5:
+        draw = ImageDraw.Draw(canvas)
+        for line in ts.lines:
+            x = line.cx - line.width / 2.0
+            draw.text((x, line.top), line.text, font=font, fill=(*style.fg, 255),
+                      stroke_width=stroke, stroke_fill=(*style.bg, 255) if stroke else None)
+        return
+    # Angled block: draw into a layer the size of the layout box, rotate about its centre.
+    layer = Image.new("RGBA", (max(1, box.w), max(1, box.h)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    for line in ts.lines:
+        x = line.cx - line.width / 2.0 - box.x
+        draw.text((x, line.top - box.y), line.text, font=font, fill=(*style.fg, 255),
+                  stroke_width=stroke, stroke_fill=(*style.bg, 255) if stroke else None)
+    _paste_rotated(canvas, layer, style.angle_deg, box.x + box.w / 2.0, box.y + box.h / 2.0)
+
+
 def _paste_rotated(canvas: Image.Image, layer: Image.Image, angle_deg: float, cx: float, cy: float) -> None:
     """Rotate ``layer`` CCW-on-screen by ``angle_deg`` and alpha-composite it
     onto ``canvas`` centred at ``(cx, cy)``.
@@ -171,10 +241,18 @@ def compose(
     segments: List[TranslatedSegment],
     font_path: Optional[str] = None,
     hide_original: bool = True,
+    *,
+    block_font_path: Optional[str] = None,
+    uppercase: bool = True,
 ) -> np.ndarray:
     """Return a copy of ``img_bgr`` with every segment's translation drawn.
 
-    For each segment: the quad polygon is filled with ``style.bg`` (when
+    Typeset blocks (``style.is_block``, produced by ``render.layout``) are
+    erased with their clean patch and flowed through their bubble outline in
+    the comic lettering font (``block_font_path``, default the bundled Comic
+    Neue), upper-cased when ``uppercase`` is set.
+
+    Plain segments: the quad polygon is filled with ``style.bg`` (when
     ``hide_original``), the translation is fitted into the quad's unrotated
     ``width x text_height`` box with :func:`fit_text`, rendered in
     ``style.fg`` and rotated by ``style.angle_deg`` about the quad centre.
@@ -183,11 +261,27 @@ def compose(
     """
     path = font_path if font_path is not None else default_font_path()
     measure = pil_measurer(path)
+    block_path = block_font_path if block_font_path is not None else (manga_font_path() or path)
+    block_measure = pil_measurer(block_path)
 
     canvas = Image.fromarray(np.ascontiguousarray(img_bgr[:, :, ::-1])).convert("RGBA")
     draw = ImageDraw.Draw(canvas)
 
-    for seg in segments:
+    # Blocks first erase, then all draw: a later block's clean patch must not
+    # paint over an earlier block's lettering.
+    blocks = [seg for seg in segments if seg.style.is_block]
+    plain = [seg for seg in segments if not seg.style.is_block]
+    if hide_original:
+        for seg in blocks:
+            st = seg.style
+            if st.clean_patch is not None and st.clean_rect is not None:
+                r = st.clean_rect
+                patch = Image.fromarray(np.ascontiguousarray(st.clean_patch[:, :, ::-1])).convert("RGBA")
+                canvas.paste(patch, (r.x, r.y))
+    for seg in blocks:
+        _draw_block(canvas, seg, block_path, block_measure, hide_original=False, uppercase=uppercase)
+
+    for seg in plain:
         quad = np.asarray(seg.quad, dtype=np.float64).reshape(4, 2)
         style = seg.style
         if hide_original:
