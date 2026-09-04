@@ -24,16 +24,32 @@ Typeset blocks
 Segments whose ``style.is_block`` is set (manga mode) are drawn the way the
 PIL renderer :func:`glasstranslate.render.compose.compose` draws them: the
 block's ``clean_patch`` (the frame with the original glyphs erased) is
-painted at ``clean_rect``, then the translation is flowed through the bubble
-outline with the shared :func:`glasstranslate.render.typeset.typeset` and a
-``QFontMetricsF`` measurer of the same bundled Comic Neue font.  The whole
-block is laid out in *frame* pixels under a ``1/dpr`` painter scale, so its
-placement is identical to the demo output at any DPI.
+painted at ``clean_rect``, then the translation is placed with the shared
+:func:`glasstranslate.render.compose.typeset_block` (bubble text flowed
+through the bubble outline, free text set on the quietest nearby paper by
+``render.place``) using a ``QFontMetricsF`` measurer of the same bundled
+Anime Ace font.  The whole block is laid out in *frame* pixels under a
+``1/dpr`` painter scale, so its placement is identical to the demo output
+at any DPI.  Pixel drawing mirrors :func:`glasstranslate.render.compose.draw_typeset`:
+first every line's paper-coloured rounded halo (``compose.halo_px`` +
+``compose.weight_px`` outward, as a pen of twice that width centred on the
+outline), then the glyphs filled in the foreground colour with a thin
+foreground pen (``2 x weight_px``) for the extra stroke weight.
+
+Caching: laying a block out (``typeset_block``) and stroking its glyph
+outlines are both far more expensive than a repaint budget allows (about 80
+ms each for a page of blocks), so per result every block's ``Typeset`` and
+its lettering, rendered once into a small ARGB layer at frame resolution,
+are kept by segment index; ``paintEvent`` only blits the layers.  Both
+caches survive pipeline passes that re-emit the same ``TranslatedSegment``
+objects (the frequent "nothing changed" ticks) and are dropped for a
+segment whose object changed, or when the case / font setting changes.
 """
 from __future__ import annotations
 
 import ctypes
 import logging
+import math
 import os
 import sys
 import threading
@@ -63,7 +79,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from ..core.types import Rect, SegmentStyle, TranslatedSegment
-from ..render.compose import MANGA_FONT_PATH, typeset_block
+from ..render.compose import MANGA_FONT_PATH, block_italic, halo_px, has_cjk, typeset_block, weight_px
 from ..render.fit import FitResult, Measure, fit_text
 from ..render.style import quad_text_height, quad_text_width
 from ..render.typeset import Typeset
@@ -88,12 +104,9 @@ _MIN_W, _MIN_H = 120, 60
 _LINE_GAP = 0.1  # extra spacing between stacked characters, fraction of size
 _MIN_FONT_PX = 6.0
 _VERTICAL_MAX_LINES = 6  # a tall column translated to Latin may need many short lines
-# Halo around lettering that sits on artwork, as a fraction of the font size
-# (the same ratio the PIL renderer uses for its stroke width).
-_HALO_RATIO = 0.12
-# Comic Neue weights bundled next to the PIL renderer's default; registered
+# Anime Ace styles bundled next to the PIL renderer's default; registered
 # with Qt once per process.
-_MANGA_FONT_FILES = ("ComicNeue-Bold.ttf", "ComicNeue-BoldItalic.ttf")
+_MANGA_FONT_FILES = ("animeace2_reg.ttf", "animeace2_ital.ttf")
 _MANGA_FONT_DIR = os.path.dirname(MANGA_FONT_PATH)
 _manga_font_family: Optional[str] = None
 
@@ -139,7 +152,7 @@ def _hwnd(widget: QWidget) -> "_wt.HWND":
 
 
 def load_manga_font() -> Optional[str]:
-    """Register the bundled Comic Neue files with Qt (once) and return the
+    """Register the bundled Anime Ace files with Qt (once) and return the
     family name, or None when the files are missing or Qt rejected them.
     Needs a ``QGuiApplication``."""
     global _manga_font_family
@@ -171,8 +184,13 @@ def make_font(family: str, size: float, *, bold: bool = False, italic: bool = Fa
 
 def qt_measurer(family: str, *, bold: bool = False, italic: bool = False) -> Measure:
     """A :data:`~glasstranslate.render.fit.Measure` for ``family`` based on
-    ``QFontMetricsF``.  ``size`` is the font pixel size; results are in the
-    same pixel unit.  Fonts and metrics are cached per rounded size."""
+    ``QFontMetricsF``: ``(horizontal advance, ascent + descent)`` like
+    :func:`glasstranslate.render.compose.pil_measurer`, so the shared
+    typesetter (which derives cap height and leading from the line height)
+    lays a block out identically for both renderers.  ``size`` is the font
+    pixel size; results are in the same pixel unit.  Fonts and metrics are
+    cached per rounded size in this measurer (one per font, used on the GUI
+    thread only)."""
     cache: Dict[int, QFontMetricsF] = {}
 
     def metrics(size: float) -> QFontMetricsF:
@@ -185,7 +203,11 @@ def qt_measurer(family: str, *, bold: bool = False, italic: bool = False) -> Mea
 
     def measure(text: str, size: float) -> Tuple[float, float]:
         fm = metrics(size)
-        return fm.horizontalAdvance(text), fm.height()
+        # FreeType (and so PIL's ``getmetrics``) reports the ascender rounded
+        # up and the descender rounded down to whole pixels; do the same so
+        # both renderers see one line height and take the same layout
+        # decisions (line pitch, cap height and the size search depend on it).
+        return fm.horizontalAdvance(text), float(math.ceil(fm.ascent()) + math.ceil(fm.descent()))
 
     return measure
 
@@ -234,7 +256,14 @@ class GlassOverlay(QWidget):
         self._native_ready = False
         self._measure: Measure = qt_measurer(self._font_family)
         self._block_family = load_manga_font() or self._font_family
-        self._block_measure: Measure = qt_measurer(self._block_family, bold=True)
+        self._block_measure: Measure = qt_measurer(self._block_family)
+        self._block_measure_italic: Measure = qt_measurer(self._block_family, italic=True)
+        # Typeset results and rendered lettering layers per segment index;
+        # laying a block out means a search over sizes and boxes and stroking
+        # its outlines is slow, so both are done once per result, not on
+        # every repaint (see the module docstring).
+        self._typesets: Dict[int, Typeset] = {}
+        self._layers: Dict[int, Tuple[QImage, int, int]] = {}  # (image, frame x, frame y)
         self._segments_changed.connect(self._apply_segments, Qt.ConnectionType.QueuedConnection)
 
     # ------------------------------------------------------------ properties
@@ -263,6 +292,8 @@ class GlassOverlay(QWidget):
         if family and family != self._font_family:
             self._font_family = family
             self._measure = qt_measurer(family)
+            self._typesets = {}  # blocks with CJK text are set in this font
+            self._layers = {}
             self.update()
 
     def set_hide_original(self, hide: bool) -> None:
@@ -271,8 +302,11 @@ class GlassOverlay(QWidget):
 
     def set_uppercase(self, uppercase: bool) -> None:
         """Letter typeset blocks in capitals (comic convention) or as translated."""
-        self._uppercase = bool(uppercase)
-        self.update()
+        if bool(uppercase) != self._uppercase:
+            self._uppercase = bool(uppercase)
+            self._typesets = {}  # the cached layouts were made for the other case
+            self._layers = {}
+            self.update()
 
     def set_click_through(self, enabled: bool) -> None:
         """Let mouse input pass through the glass (``True``) or catch it."""
@@ -402,17 +436,17 @@ class GlassOverlay(QWidget):
         dpr = self.devicePixelRatioF() or 1.0
         # Blocks first erase, then all draw (a later block's patch must not
         # cover an earlier block's lettering), then the plain segments.
-        blocks = [(i, seg) for i, seg in enumerate(self._segments) if seg.style.is_block]
+        blocks = [(i, seg) for i, seg in enumerate(self._segments) if seg.style.is_block and not seg.untranslated]
         if self._hide_original:
             for i, seg in blocks:
                 self._paint_clean_patch(painter, i, seg.style, dpr)
-        for _, seg in blocks:
+        for i, seg in blocks:
             try:
-                self._paint_block(painter, seg, dpr)
+                self._paint_block(painter, seg, dpr, i)
             except Exception:  # one bad segment must not blank the glass
                 log.exception("failed to paint block %r", seg.source_text)
         for seg in self._segments:
-            if seg.style.is_block:
+            if seg.style.is_block or seg.untranslated:
                 continue
             try:
                 self._paint_segment(painter, seg, dpr)
@@ -431,19 +465,43 @@ class GlassOverlay(QWidget):
             return
         painter.drawImage(QRectF(rect.x / dpr, rect.y / dpr, rect.w / dpr, rect.h / dpr), image)
 
-    def _paint_block(self, painter: QPainter, seg: TranslatedSegment, dpr: float) -> None:
+    def _paint_block(self, painter: QPainter, seg: TranslatedSegment, dpr: float, index: int = -1) -> None:
         """Flow the translation through the block's layout region and letter
         it in the comic font, with a halo when it sits on artwork.  Everything
         is computed in frame pixels; the painter is scaled by ``1/dpr``."""
         text = seg.translation.strip()
         if not text:
             return
-        if self._uppercase:
+        # As :func:`compose.compose`: capitals in the comic font, unless the
+        # translation still carries CJK (Anime Ace has no such glyphs): then
+        # the overlay font, upright and as translated, like the PIL renderer's
+        # CJK system-font fallback.
+        cjk = has_cjk(text)
+        if self._uppercase and not cjk:
             text = text.upper()
         style = seg.style
-        ts = typeset_block(text, style, self._block_measure)
+        italic = block_italic(style) and not cjk
+        family = self._font_family if cjk else self._block_family
+        ts = self._typesets.get(index) if index >= 0 else None
+        if ts is None:
+            if cjk:
+                measure = self._measure
+            else:
+                measure = self._block_measure_italic if italic else self._block_measure
+            ts = typeset_block(text, style, measure, lang=seg.tgt_lang or "en")
+            if index >= 0:
+                self._typesets[index] = ts
         if not ts.lines:
             return
+        # Dialogue (vertical source text) is italic like printed comics;
+        # horizontal captions such as chapter titles stay upright.
+        font = make_font(family, ts.size, italic=italic)
+        layer = self._layers.get(index) if index >= 0 else None
+        if layer is None:
+            layer = self._render_layer(ts, font, style)
+            if index >= 0:
+                self._layers[index] = layer
+        image, x0, y0 = layer
         painter.save()
         painter.scale(1.0 / dpr, 1.0 / dpr)
         if abs(style.angle_deg) >= 0.5:
@@ -453,35 +511,87 @@ class GlassOverlay(QWidget):
             painter.translate(cx, cy)
             painter.rotate(-style.angle_deg)
             painter.translate(-cx, -cy)
-        # Dialogue (bubbles, free speech over art) is italic like printed
-        # comics; flat captions such as chapter titles stay upright.
-        italic = style.layout_mask is not None or style.outline
-        font = make_font(self._block_family, ts.size, bold=True, italic=italic)
-        self._draw_typeset(painter, ts, font, style)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(QPointF(x0, y0), image)
         painter.restore()
 
+    def _render_layer(self, ts: Typeset, font: QFont, style: SegmentStyle) -> Tuple[QImage, int, int]:
+        """Render the lettering of ``ts`` once into a transparent ARGB image
+        at frame resolution: ``(image, x, y)`` with ``(x, y)`` the frame pixel
+        of the image's top-left corner (integers, so blitting it reproduces
+        the direct drawing's sub-pixel positions exactly).  The image covers
+        the glyph outlines plus the halo / weight pens."""
+        paths = self._glyph_paths(ts, font)
+        bounds = QRectF()
+        for path in paths:
+            bounds = bounds.united(path.boundingRect())
+        pad = halo_px(ts.size) + weight_px(ts.size) + 2
+        x0 = int(math.floor(bounds.left())) - pad
+        y0 = int(math.floor(bounds.top())) - pad
+        w = int(math.ceil(bounds.right())) - x0 + pad + 1
+        h = int(math.ceil(bounds.bottom())) - y0 + pad + 1
+        image = QImage(max(1, w), max(1, h), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        p = QPainter(image)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.translate(-x0, -y0)
+        self._stroke_paths(p, paths, ts.size, style)
+        p.end()
+        return image, x0, y0
+
     def _draw_typeset(self, painter: QPainter, ts: Typeset, font: QFont, style: SegmentStyle) -> None:
-        """Draw the placed lines of ``ts`` at their frame positions."""
+        """Draw the placed lines of ``ts`` at their frame positions, exactly
+        as :func:`glasstranslate.render.compose.draw_typeset` does with PIL.
+
+        ``PlacedLine.top`` is the top of the font's line box (the PIL text
+        origin), so the Qt baseline is ``top + ascent``.  Two passes over all
+        lines, as glyph outlines (``QPainterPath.addText``): first, when the
+        block sits on artwork (``style.outline``), every line's halo - the
+        paper colour, reaching ``halo_px + weight_px`` outward, which for a
+        pen centred on the outline means twice that width, round joins and
+        caps like PIL's stroker - then every line's glyphs filled with the
+        foreground colour under a thin foreground pen of ``2 x weight_px``
+        (the same outward reach as PIL's ``stroke_width=weight_px``).
+        Halos first keeps a line's halo from cutting into the descenders of
+        the line above.  (``paintEvent`` blits the cached :meth:`_render_layer`
+        image made with this same code instead of re-stroking every paint.)"""
+        self._stroke_paths(painter, self._glyph_paths(ts, font), ts.size, style)
+
+    @staticmethod
+    def _glyph_paths(ts: Typeset, font: QFont) -> List[QPainterPath]:
+        """One glyph-outline path per placed line, in frame pixels."""
         ascent = QFontMetricsF(font).ascent()
-        halo: Optional[QPen] = None
+        paths: List[QPainterPath] = []
+        for line in ts.lines:
+            path = QPainterPath()
+            path.addText(QPointF(line.cx - line.width / 2.0, line.top + ascent), font, line.text)
+            paths.append(path)
+        return paths
+
+    @staticmethod
+    def _stroke_paths(painter: QPainter, paths: Sequence[QPainterPath], size: float, style: SegmentStyle) -> None:
+        """The two drawing passes of :meth:`_draw_typeset` over prebuilt paths."""
+        weight = weight_px(size)
         if style.outline:
-            # A pen is centred on the glyph outline, so twice the PIL stroke
-            # width reaches the same distance outward.
-            halo = QPen(QColor(*style.bg), 2.0 * max(1.0, round(ts.size * _HALO_RATIO)))
+            bg = QColor(*style.bg)
+            halo = QPen(bg, 2.0 * (halo_px(size) + weight))
             halo.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             halo.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setFont(font)
-        for line in ts.lines:
-            x = line.cx - line.width / 2.0
-            baseline = line.top + ascent
-            if halo is not None:
-                path = QPainterPath()
-                path.addText(QPointF(x, baseline), font, line.text)
-                painter.setPen(halo)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(halo)
+            painter.setBrush(bg)
+            for path in paths:
                 painter.drawPath(path)
-            painter.setPen(QColor(*style.fg))
-            painter.drawText(QPointF(x, baseline), line.text)
+        fg = QColor(*style.fg)
+        if weight > 0:
+            stroke = QPen(fg, 2.0 * weight)
+            stroke.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            stroke.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(stroke)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fg)
+        for path in paths:
+            painter.drawPath(path)
 
     def _paint_segment(self, painter: QPainter, seg: TranslatedSegment, dpr: float) -> None:
         quad = np.asarray(seg.quad, dtype=np.float64).reshape(4, 2) / dpr
@@ -614,10 +724,29 @@ class GlassOverlay(QWidget):
     # ------------------------------------------------------------- slots
     @Slot(object)
     def _apply_segments(self, segments: object) -> None:
-        self._segments = list(segments) if isinstance(segments, (list, tuple)) else []
-        self._patches = {
-            i: bgr_to_qimage(seg.style.clean_patch)
-            for i, seg in enumerate(self._segments)
-            if seg.style.is_block and seg.style.clean_patch is not None
-        }
+        new = list(segments) if isinstance(segments, (list, tuple)) else []
+        # The pipeline re-emits the very same TranslatedSegment objects on
+        # every pass that changed nothing (and for the untouched blocks of a
+        # partial re-read), so cached layouts, lettering layers and patch
+        # images are carried over by object identity; anything else is
+        # recomputed.  ``self._segments`` keeps the old objects alive while
+        # the ids are matched, so an id cannot be reused by a new object.
+        old_index = {id(seg): i for i, seg in enumerate(self._segments)}
+        typesets: Dict[int, Typeset] = {}
+        layers: Dict[int, Tuple[QImage, int, int]] = {}
+        patches: Dict[int, QImage] = {}
+        for i, seg in enumerate(new):
+            j = old_index.get(id(seg))
+            if j is not None:
+                if j in self._typesets:
+                    typesets[i] = self._typesets[j]
+                if j in self._layers:
+                    layers[i] = self._layers[j]
+            if seg.style.is_block and seg.style.clean_patch is not None:
+                reused = self._patches.get(j) if j is not None else None
+                patches[i] = reused if reused is not None else bgr_to_qimage(seg.style.clean_patch)
+        self._segments = new
+        self._typesets = typesets
+        self._layers = layers
+        self._patches = patches
         self.update()

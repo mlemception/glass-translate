@@ -335,7 +335,7 @@ class ControlWindow(QMainWindow):
         self.manga_mode_check.setToolTip(
             "Group the columns of a speech bubble into one block, translate the whole "
             "utterance, erase the original and letter the translation in the bundled "
-            "Comic Neue font, flowed to the bubble outline."
+            "Anime Ace font, flowed to the bubble outline."
         )
         self.uppercase_check = QCheckBox("Uppercase")
         self.uppercase_check.setToolTip("Letter manga-mode blocks in capitals, as printed English comics do.")

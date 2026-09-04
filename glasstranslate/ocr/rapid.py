@@ -99,6 +99,9 @@ class RapidOCREngine(OCREngine):
         for quad, text, score in zip(boxes, result.txts, result.scores):
             conf = float(score)
             text = text.strip()
+            # Low-confidence lines are dropped here (and by RapidOCR's own
+            # ``Global.text_score``); see the TODO in ``Pipeline._group_blocks``
+            # for threading them to the eraser as ``all_segments``.
             if not text or conf < self.min_confidence:
                 continue
             segments.append(Segment(text=text, quad=np.ascontiguousarray(quad), confidence=conf))

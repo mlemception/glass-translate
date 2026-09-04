@@ -12,3 +12,4 @@ sentencepiece>=0.2
 py3langid>=0.3
 pynput>=1.7
 pytest>=8
+pyphen>=0.14

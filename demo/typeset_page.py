@@ -24,6 +24,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# The report prints Japanese source text; a cp1252 console (Windows default)
+# must not abort the run on it.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - closed or exotic stream
+            pass
+
+from glasstranslate.core.pipeline import clean_translation  # noqa: E402
 from glasstranslate.core.types import StyledSegment, TranslatedSegment  # noqa: E402
 from glasstranslate.ocr import RapidOCREngine, ScriptLanguageDetector  # noqa: E402
 from glasstranslate.render import build_blocks, compose  # noqa: E402
@@ -36,10 +46,13 @@ def draw_blocks(img: np.ndarray, blocks) -> np.ndarray:
     out = img.copy()
     for i, b in enumerate(blocks):
         st = b.style
-        if b.bubble is not None and st.layout_mask is not None:
+        if st.layout_mask is not None and st.layout_box is not None:
+            # The mask is aligned with the layout box (not the bubble rect).
             overlay = out.copy()
             ys, xs = np.nonzero(st.layout_mask)
-            overlay[ys + b.bubble.y, xs + b.bubble.x] = (255, 200, 120)
+            ys = np.clip(ys + st.layout_box.y, 0, out.shape[0] - 1)
+            xs = np.clip(xs + st.layout_box.x, 0, out.shape[1] - 1)
+            overlay[ys, xs] = (255, 200, 120)
             out = cv2.addWeighted(overlay, 0.35, out, 0.65, 0)
         for m in b.members:
             cv2.polylines(out, [m.quad.astype(np.int32)], True, (0, 180, 0), 1)
@@ -96,6 +109,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     translated: List[TranslatedSegment] = []
     for b, tr in zip(blocks, translations):
+        # Same rule as the live pipeline: drop <unk> markers, and show the
+        # source untouched when nothing usable came back.
+        tr = clean_translation(tr) or b.segment.text
         styled = StyledSegment(segment=b.segment, style=b.style, src_lang=src)
         translated.append(TranslatedSegment(styled=styled, translation=tr, tgt_lang=args.tgt))
         kind = "bubble" if b.bubble else ("art" if b.style.outline else "flat")

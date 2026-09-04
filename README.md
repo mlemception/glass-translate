@@ -171,7 +171,7 @@ professional English edition is lettered. The same code path serves the live gla
    largest size at or below a ceiling derived from the source glyph height (so all blocks on
    a page share a scale), hyphenated only when a word cannot fit a line, and the lines are
    balanced so a bubble reads as a centred oval. Text over artwork gets a halo (a stroke in
-   the background colour, 0.12 em wide) for legibility. Dialogue is set in bold italic;
+   the background colour, 0.11 em wide) for legibility. Dialogue is set in italic;
    flat captions stay upright.
 5. **Live glass**. The pipeline emits one segment per block (`style.is_block`), carrying the
    layout region, the erased patch and the halo flag. The overlay paints the patch at its
@@ -187,9 +187,11 @@ configured font family as before (vertical columns rotated 90 degrees).
 
 ### Fonts
 
-Blocks are lettered in **Comic Neue** (Bold and Bold Italic), bundled in
-`glasstranslate/render/fonts/` under the SIL Open Font License 1.1 (`OFL.txt` alongside the
-files). The demo uses it through PIL, the overlay registers it with `QFontDatabase` at startup.
+Blocks are lettered in **Anime Ace 2.0 BB** (Regular and Italic) by Nate Piekos / Blambot,
+bundled in `glasstranslate/render/fonts/animeace/`. It is freeware for independent comic and
+non-profit use only and may not be redistributed without the author's permission (see
+`font info.txt` alongside the files and https://blambot.com). The demo uses it through PIL,
+the overlay registers it with `QFontDatabase` at startup.
 The "Font" setting only affects non-block segments.
 
 ### Typesetting a page from the command line

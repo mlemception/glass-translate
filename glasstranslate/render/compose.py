@@ -16,14 +16,27 @@ from typing import List, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from ..core.types import Rect, TranslatedSegment
-from .fit import FitResult, Measure, fit_text
+from ..core.types import Rect, SegmentStyle, TranslatedSegment
+from .fit import Measure, fit_text
 from .style import quad_text_height, quad_text_width
-from .typeset import Typeset, mask_spans, rect_spans, typeset
+from . import place
+from .typeset import Typeset, mask_spans, rect_spans
 
-# Comic-style lettering font bundled with the package (SIL Open Font License).
-_FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
-MANGA_FONT_PATH = os.path.join(_FONT_DIR, "ComicNeue-Bold.ttf")
+# Comic lettering font bundled with the package: Anime Ace 2.0 BB (Blambot,
+# free for independent comic / non-profit use; see ``fonts/animeace/font
+# info.txt``), the standard scanlation lettering face.  Dialogue is lettered
+# in the italic (the convention for speech and thought in translated manga);
+# horizontal captions and titles stay upright.
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts", "animeace")
+MANGA_FONT_PATH = os.path.join(_FONT_DIR, "animeace2_reg.ttf")
+MANGA_FONT_ITALIC_PATH = os.path.join(_FONT_DIR, "animeace2_ital.ttf")
+# Halo (stroke) around lettering placed on artwork, as a fraction of the font
+# size: about 3 px at dialogue size, paper-coloured, rounded (measured on
+# professionally lettered pages: 0.10-0.11 em).
+HALO_RATIO = 0.11
+# Foreground stroke added to every letter (fraction of the font size) to
+# thicken the lettering.  Zero: Anime Ace is drawn at its designed weight.
+WEIGHT_RATIO = 0.0
 
 # Candidate default fonts, best CJK coverage first.
 _DEFAULT_FONT_CANDIDATES = (
@@ -47,9 +60,33 @@ def default_font_path() -> Optional[str]:
     return None
 
 
-def manga_font_path() -> Optional[str]:
+def manga_font_path(italic: bool = False) -> Optional[str]:
     """The bundled comic lettering font used for typeset blocks, if present."""
+    path = MANGA_FONT_ITALIC_PATH if italic else MANGA_FONT_PATH
+    if os.path.exists(path):
+        return path
     return MANGA_FONT_PATH if os.path.exists(MANGA_FONT_PATH) else None
+
+
+def has_cjk(text: str) -> bool:
+    """True when ``text`` contains CJK ideographs or kana (which the bundled
+    comic font cannot draw; such blocks use the CJK system font instead)."""
+    return any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF or 0xFF00 <= ord(c) <= 0xFFEF for c in text)
+
+
+def block_italic(style: SegmentStyle) -> bool:
+    """Dialogue (vertical source text: speech, thought, narration) is
+    lettered in italic; horizontal source lines are captions, titles or sound
+    effects and stay upright."""
+    return bool(style.vertical)
+
+
+def block_font_path_for(style: SegmentStyle, text: str, fallback: Optional[str]) -> Optional[str]:
+    """Font file for one block's translation: the comic font (italic for
+    dialogue) unless the text still contains CJK, then ``fallback``."""
+    if has_cjk(text):
+        return fallback
+    return manga_font_path(block_italic(style)) or fallback
 
 
 @lru_cache(maxsize=256)
@@ -69,19 +106,28 @@ def _font(font_path: Optional[str], size: float):
     return _load_font(font_path, max(_MIN_FONT_PX, int(round(size))))
 
 
+@lru_cache(maxsize=32768)
+def _measure_cached(font_path: Optional[str], size_px: int, text: str) -> tuple[float, float]:
+    """``(advance, ascent + descent)`` of ``text`` in the font at ``size_px``.
+    Process-wide: the typesetter re-measures the same few hundred strings on
+    every compose / frame, and ``FreeTypeFont.getlength`` costs ~150 us."""
+    font = _load_font(font_path, size_px)
+    width = float(font.getlength(text)) if text else 0.0
+    ascent, descent = font.getmetrics()
+    return width, float(ascent + descent)
+
+
 def pil_measurer(font_path: Optional[str] = None) -> Measure:
     """Build a ``measure(text, size) -> (width, height)`` callable backed by
     PIL font metrics for ``font_path`` (default: :func:`default_font_path`).
     Height is the font's ascent+descent so line stacking is consistent
-    regardless of which glyphs a line contains.
+    regardless of which glyphs a line contains.  Measurements are cached
+    process-wide by ``(font, rounded size, text)``.
     """
     path = font_path if font_path is not None else default_font_path()
 
     def measure(text: str, size: float) -> tuple[float, float]:
-        font = _font(path, size)
-        width = float(font.getlength(text)) if text else 0.0
-        ascent, descent = font.getmetrics()
-        return width, float(ascent + descent)
+        return _measure_cached(path, max(_MIN_FONT_PX, int(round(size))), text)
 
     return measure
 
@@ -163,19 +209,21 @@ def _render_vertical_layer(
     return layer
 
 
-def block_spans(style, box: Rect) -> np.ndarray:
+def block_spans(style, box: Rect, cx: Optional[float] = None) -> np.ndarray:
     """Row spans for a block's layout region (bubble mask or plain box)."""
     if style.layout_mask is not None and style.layout_mask.shape[:2] == (box.h, box.w):
-        return mask_spans(style.layout_mask, box)
+        return mask_spans(style.layout_mask, box, cx)
     return rect_spans(box)
 
 
-def typeset_block(text: str, style, measure: Measure, *, min_size: float = 7.0) -> Typeset:
-    """Typeset ``text`` into a block's layout region using its size ceiling."""
-    box = style.layout_box
-    assert box is not None
-    max_size = style.max_font_px or max(min_size, style.text_height_px * 0.7)
-    return typeset(text, block_spans(style, box), float(box.y), measure, max_size=max(max_size, min_size), min_size=min_size)
+def typeset_block(text: str, style, measure: Measure, *, min_size: float = 7.0, lang: str = "en") -> Typeset:
+    """Typeset ``text`` for a block: the geometry shared by this PIL renderer
+    and the Qt overlay.  Delegates to :func:`glasstranslate.render.place.typeset_block`:
+    bubble text is flowed through the bubble mask and centred in it; free
+    text is set as a compact block on the quietest nearby patch of the panel
+    (see that module).  The size ceiling is :func:`place.size_ceiling`.
+    """
+    return place.typeset_block(text, style, measure, min_size=min_size, lang=lang)
 
 
 def _draw_block(
@@ -188,8 +236,10 @@ def _draw_block(
 ) -> None:
     """Render a typeset block: erase the original with its clean patch, then
     flow the translation through the bubble/box outline, with a halo when the
-    text sits on artwork."""
+    text sits on artwork.  Untranslated blocks are left untouched."""
     style = seg.style
+    if seg.untranslated:
+        return
     if hide_original and style.clean_patch is not None and style.clean_rect is not None:
         r = style.clean_rect
         patch = Image.fromarray(np.ascontiguousarray(style.clean_patch[:, :, ::-1])).convert("RGBA")
@@ -197,30 +247,81 @@ def _draw_block(
     text = seg.translation.strip()
     if not text:
         return
-    if uppercase:
+    if uppercase and not has_cjk(text):
         text = text.upper()
-    ts = typeset_block(text, style, measure)
+    ts = typeset_block(text, style, measure, lang=seg.tgt_lang or "en")
     if not ts.lines:
         return
     font = _font(font_path, ts.size)
-    stroke = max(1, int(round(ts.size * 0.12))) if style.outline else 0
     box = style.layout_box
     assert box is not None
     if abs(style.angle_deg) < 0.5:
-        draw = ImageDraw.Draw(canvas)
-        for line in ts.lines:
-            x = line.cx - line.width / 2.0
-            draw.text((x, line.top), line.text, font=font, fill=(*style.fg, 255),
-                      stroke_width=stroke, stroke_fill=(*style.bg, 255) if stroke else None)
+        draw_typeset(ImageDraw.Draw(canvas), ts, font, style.fg, style.bg, style.outline)
         return
-    # Angled block: draw into a layer the size of the layout box, rotate about its centre.
-    layer = Image.new("RGBA", (max(1, box.w), max(1, box.h)), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+    # Angled block: draw into a layer covering the layout box and the placed
+    # lines, rotate it about the layout box centre.
+    ext = box
+    bb = ts.bbox
+    if bb is not None:
+        pad = halo_px(ts.size) + weight_px(ts.size) + 2
+        ext = ext.union(Rect(bb.x - pad, bb.y - pad, bb.w + 2 * pad, bb.h + 2 * pad))
+    layer = Image.new("RGBA", (max(1, ext.w), max(1, ext.h)), (0, 0, 0, 0))
+    draw_typeset(ImageDraw.Draw(layer), ts, font, style.fg, style.bg, style.outline, dx=ext.x, dy=ext.y)
+    cx, cy = box.x + box.w / 2.0, box.y + box.h / 2.0
+    # The layer is centred on ``ext``; rotate about the layout box centre.
+    _paste_rotated_about(canvas, layer, style.angle_deg, ext.x + ext.w / 2.0, ext.y + ext.h / 2.0, cx, cy)
+
+
+def halo_px(size: float) -> int:
+    """Halo stroke width in pixels for lettering at ``size``."""
+    return max(1, int(round(size * HALO_RATIO)))
+
+
+def weight_px(size: float) -> int:
+    """Foreground stroke width (weight) in pixels for lettering at ``size``."""
+    return int(round(size * WEIGHT_RATIO))
+
+
+def draw_typeset(
+    draw: ImageDraw.ImageDraw,
+    ts: Typeset,
+    font,
+    fg: tuple[int, int, int],
+    bg: tuple[int, int, int],
+    outline: bool,
+    *,
+    dx: float = 0.0,
+    dy: float = 0.0,
+) -> None:
+    """Draw the placed lines of ``ts`` with PIL, offset by ``(-dx, -dy)``.
+    Two passes: first the rounded paper-coloured halo of every line (only
+    when ``outline``), then the letters with a thin foreground stroke that
+    approximates the heavier weight of professional lettering.  Drawing all
+    halos before any letters keeps a line's halo from cutting into the
+    descenders of the line above."""
+    weight = weight_px(ts.size)
+    if outline:
+        halo = halo_px(ts.size) + weight
+        for line in ts.lines:
+            x = line.cx - line.width / 2.0 - dx
+            draw.text((x, line.top - dy), line.text, font=font, fill=(*bg, 255), stroke_width=halo, stroke_fill=(*bg, 255))
     for line in ts.lines:
-        x = line.cx - line.width / 2.0 - box.x
-        draw.text((x, line.top - box.y), line.text, font=font, fill=(*style.fg, 255),
-                  stroke_width=stroke, stroke_fill=(*style.bg, 255) if stroke else None)
-    _paste_rotated(canvas, layer, style.angle_deg, box.x + box.w / 2.0, box.y + box.h / 2.0)
+        x = line.cx - line.width / 2.0 - dx
+        draw.text((x, line.top - dy), line.text, font=font, fill=(*fg, 255),
+                  stroke_width=weight, stroke_fill=(*fg, 255) if weight else None)
+
+
+def _paste_rotated_about(
+    canvas: Image.Image, layer: Image.Image, angle_deg: float, lcx: float, lcy: float, cx: float, cy: float
+) -> None:
+    """Rotate ``layer`` (whose centre sits at frame point ``(lcx, lcy)``) by
+    ``angle_deg`` about the frame point ``(cx, cy)`` and composite it."""
+    a = np.deg2rad(angle_deg)
+    # Rotating CCW on screen (y down) about (cx, cy) maps the layer centre to:
+    vx, vy = lcx - cx, lcy - cy
+    rx = cx + vx * np.cos(a) + vy * np.sin(a)
+    ry = cy - vx * np.sin(a) + vy * np.cos(a)
+    _paste_rotated(canvas, layer, angle_deg, float(rx), float(ry))
 
 
 def _paste_rotated(canvas: Image.Image, layer: Image.Image, angle_deg: float, cx: float, cy: float) -> None:
@@ -248,9 +349,10 @@ def compose(
     """Return a copy of ``img_bgr`` with every segment's translation drawn.
 
     Typeset blocks (``style.is_block``, produced by ``render.layout``) are
-    erased with their clean patch and flowed through their bubble outline in
-    the comic lettering font (``block_font_path``, default the bundled Comic
-    Neue), upper-cased when ``uppercase`` is set.
+    erased with their clean patch and lettered with :func:`typeset_block`
+    (bubble text flowed through the bubble outline, free text placed by
+    ``render.place``) in the comic lettering font (``block_font_path``,
+    default the bundled Anime Ace), upper-cased when ``uppercase`` is set.
 
     Plain segments: the quad polygon is filled with ``style.bg`` (when
     ``hide_original``), the translation is fitted into the quad's unrotated
@@ -261,15 +363,14 @@ def compose(
     """
     path = font_path if font_path is not None else default_font_path()
     measure = pil_measurer(path)
-    block_path = block_font_path if block_font_path is not None else (manga_font_path() or path)
-    block_measure = pil_measurer(block_path)
 
     canvas = Image.fromarray(np.ascontiguousarray(img_bgr[:, :, ::-1])).convert("RGBA")
     draw = ImageDraw.Draw(canvas)
 
     # Blocks first erase, then all draw: a later block's clean patch must not
-    # paint over an earlier block's lettering.
-    blocks = [seg for seg in segments if seg.style.is_block]
+    # paint over an earlier block's lettering.  Blocks whose translation is
+    # just the source text are left exactly as they were.
+    blocks = [seg for seg in segments if seg.style.is_block and not seg.untranslated]
     plain = [seg for seg in segments if not seg.style.is_block]
     if hide_original:
         for seg in blocks:
@@ -279,7 +380,12 @@ def compose(
                 patch = Image.fromarray(np.ascontiguousarray(st.clean_patch[:, :, ::-1])).convert("RGBA")
                 canvas.paste(patch, (r.x, r.y))
     for seg in blocks:
-        _draw_block(canvas, seg, block_path, block_measure, hide_original=False, uppercase=uppercase)
+        text = seg.translation.strip()
+        if block_font_path is not None and not has_cjk(text):
+            bpath: Optional[str] = block_font_path
+        else:
+            bpath = block_font_path_for(seg.style, text, path)
+        _draw_block(canvas, seg, bpath, pil_measurer(bpath), hide_original=False, uppercase=uppercase)
 
     for seg in plain:
         quad = np.asarray(seg.quad, dtype=np.float64).reshape(4, 2)

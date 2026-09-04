@@ -14,18 +14,27 @@ Turns raw OCR lines into *text blocks* ready for translation and rendering:
    text itself painted over) to find the speech bubble.  When the enclosing
    region is bubble-sized the translation is typeset inside its outline;
    otherwise the text is treated as free text over artwork.
-4. **Erasing** - inside a bubble the text is painted out with the paper
-   colour; over artwork the glyph strokes are inpainted so the drawing under
-   the letters is kept, and the translation is rendered with a halo.
+4. **Sizing** - the translation's font size ceiling is the source
+   characters' em (their pitch along the column), shared by every dialogue
+   block on the page so all speech is lettered at one size.
+5. **Erasing** (:mod:`.erase`) - glyph strokes are separated from the
+   artwork with connected components and removed; paper stays paper and
+   art lines run on through the erased area.  Text left on artwork is
+   flagged for a halo (``outline``).
+6. **Placement data** (:mod:`.place`) - free text (no bubble) gets an ink
+   map and a blocked map of its neighbourhood so the renderer can letter it
+   where a human letterer would: a compact block on quiet paper near the
+   source, never over another block or across a panel border.
 
 The output is a :class:`~glasstranslate.core.types.SegmentStyle` per block
 with its typesetting fields filled (``layout_box``, ``layout_mask``,
-``clean_patch``, ``outline``, ``max_font_px``...).  Renderers that do not
-understand blocks still work: the block's segment quad is the union of its
-lines, and the plain style fields are valid.
+``clean_patch``, ``outline``, ``max_font_px``, ``search_box``...).
+Renderers that do not understand blocks still work: the block's segment
+quad is the union of its lines, and the plain style fields are valid.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -42,15 +51,40 @@ _FURIGANA_MAX_RATIO = 0.7  # glyph size relative to the neighbouring main text
 _FURIGANA_REACH = 1.4  # how far (in main glyph sizes) furigana may sit from its text
 _GROUP_REACH = 0.7  # gap (in glyph sizes) that still joins two lines into a block
 _GROUP_SIZE_RATIO = 1.7  # max glyph-size ratio between the lines of one block
-_BUBBLE_MAX_AREA_RATIO = 20.0  # paper area / block area beyond which it is not a bubble
-_BUBBLE_MAX_DIM_RATIO = 6.0  # paper w or h / block w or h beyond which it is not a bubble
-_BUBBLE_MARGIN = 0.35  # inset of the layout region from the bubble outline (glyph sizes)
-_OPEN_EXPAND_X = 0.6  # horizontal growth of the layout box for text without a bubble (glyphs)
-_OPEN_EXPAND_Y = 0.3
-_FLAT_STD = 14.0  # grey std-dev below which the area around free text counts as flat
-_MAX_FONT_RATIO = 0.72  # translation font size ceiling relative to the source glyph size
-_INPAINT_RADIUS = 3
-_TEXT_PAD = 2  # pixels added around a line's bbox when erasing / masking
+_BUBBLE_MAX_AREA_RATIO = 12.0  # paper area / block area beyond which it is not a bubble
+# A bubble hugs its text: its width/height may exceed the text's by at most
+# this factor plus a two-glyph margin.  Larger paper regions are the panel
+# background, and the text on them is free text laid out where it was.
+_BUBBLE_MAX_DIM_RATIO = 2.5
+_BUBBLE_MIN_SOLIDITY = 0.75  # paper area / convex hull area: bubbles are convex-ish
+# Inset of the layout region from the bubble outline, in ems of the block's
+# source text (the lettering's size ceiling): the lettering keeps this much
+# air from the outline on every side (reference pages: ~0.25 em from ink to
+# line, of which the halo takes 0.1).  Measured in ems, not OCR box widths,
+# which run 1.4 x the em and would waste a third of a caption box.
+_BUBBLE_MARGIN_EM = 0.18
+# Free text (no bubble): ``layout_seed`` is the source footprint slightly
+# widened, ``layout_box`` the same grown to these limits.  The renderer
+# places the lettering with the ``search_box`` / ink / blocked maps from
+# :mod:`.place`; the layout box is its fallback region and what the pipeline
+# treats as the block's footprint.
+_OPEN_SEED_X = 0.3  # glyphs added on each side of the source footprint
+_OPEN_SEED_Y = 0.1
+_OPEN_LIMIT_X = 0.75  # fraction of the source width added on each side...
+_OPEN_LIMIT_MIN_X = 1.5  # ...but at least this many glyphs
+_OPEN_LIMIT_Y = 0.5  # glyphs added above and below
+# Translation font size ceiling relative to the *source em* (the character
+# pitch along a column, ``TextBlock.em_px``): professionally typeset pages
+# letter the English with a cap height of ~0.69 x the Japanese pitch
+# (reference: cap 19 px on a 27.8 px pitch, about half the OCR column
+# width, which runs ~1.37 x the pitch).  Anime Ace's cap height is 0.84 em,
+# so its em is 0.82 x the pitch.
+_MAX_FONT_RATIO = 0.82
+# Blocks whose em is within this band of the page median share the
+# median-based size, so all dialogue on a page is lettered at one size.
+_UNIFORM_BAND = (0.7, 1.4)
+_FG_SNAP_LUMA = 90.0  # text this dark is lettered in pure black
+_TEXT_PAD = 2  # pixels added around a line's bbox when masking
 
 
 @dataclass
@@ -62,19 +96,24 @@ class TextBlock:
     members: List[Segment]
     furigana: List[Segment] = field(default_factory=list)
     bubble: Optional[Rect] = None  # bounding box of the detected bubble, if any
+    # Em of the source characters (median character pitch of the member
+    # lines, pixels); the translation's size ceiling derives from it.  0 =
+    # unknown (callers fall back to ``style.text_height_px``).
+    em_px: float = 0.0
 
 
 @dataclass
 class _Line:
     seg: Segment
     bbox: Rect
-    glyph: float  # em size of the glyphs, pixels
+    glyph: float  # column width (vertical) / line height (horizontal), pixels
     vertical: Optional[bool]  # None: single glyph, orientation unknown
     kana: bool
     fg: RGB = (0, 0, 0)
     bg: RGB = (255, 255, 255)
     comp: Tuple[bool, int] = (False, 0)  # (dark paper?, component label)
     furigana_of: Optional[int] = None
+    em: float = 0.0  # character em (pitch), pixels; see :func:`glyph_em`
 
     @property
     def area(self) -> int:
@@ -121,13 +160,44 @@ def _rect_quad(rect: Rect) -> np.ndarray:
 
 
 def glyph_size(seg: Segment) -> float:
-    """Em size of a line's glyphs: the column width for vertical text, the
-    line height for horizontal text, the smaller side for a lone glyph."""
+    """Size of a line across its reading direction: the column width for
+    vertical text, the line height for horizontal text, the smaller side for
+    a lone glyph.  OCR boxes carry padding, so this runs about 1.4 x the
+    character em (see :func:`glyph_em`)."""
     w = quad_text_width(seg.quad)
     h = quad_text_height(seg.quad)
     if len(seg.text.strip()) <= 1:
         return max(1.0, min(w, h))
     return max(1.0, w if is_vertical(seg.quad, seg.text) else h)
+
+
+def _cell_count(text: str) -> float:
+    """Number of character cells ``text`` occupies along its line: CJK and
+    other full-width characters take one cell, everything else (Latin
+    letters, digits, spaces) half a cell."""
+    total = 0.0
+    for c in text:
+        if has_cjk(c) or 0x3000 <= ord(c) <= 0x30FF:
+            total += 1.0
+        else:
+            total += 0.5
+    return max(1.0, total)
+
+
+def glyph_em(seg: Segment) -> float:
+    """Em of a line's characters: the character pitch (extent along the
+    reading direction over the number of character cells), capped by the
+    extent across it.  Immune to boxes the detector inflated sideways over
+    a neighbouring column (their pitch is still right) and to the padding
+    every box carries across the text."""
+    w = quad_text_width(seg.quad)
+    h = quad_text_height(seg.quad)
+    text = seg.text.strip()
+    if len(text) <= 1:
+        return max(1.0, min(w, h))
+    along, across = (h, w) if is_vertical(seg.quad, text) else (w, h)
+    pitch = along / _cell_count(text)
+    return max(1.0, min(across, pitch))
 
 
 def _line(seg: Segment, width: int, height: int) -> _Line:
@@ -137,7 +207,7 @@ def _line(seg: Segment, width: int, height: int) -> _Line:
         vertical = None
     else:
         vertical = is_vertical(seg.quad, seg.text)
-    return _Line(seg, seg.bbox.clamp(width, height), glyph_size(seg), vertical, is_kana_only(text))
+    return _Line(seg, seg.bbox.clamp(width, height), glyph_size(seg), vertical, is_kana_only(text), em=glyph_em(seg))
 
 
 class _PaperMaps:
@@ -241,53 +311,17 @@ def _ordered_text(members: List[_Line], vertical: bool) -> str:
     return joiner.join(t for t in texts if t)
 
 
-# ------------------------------------------------------------ erasing
-def _stroke_mask(crop_bgr: np.ndarray, boxes: Sequence[Rect], origin: Rect, fg: RGB, bg: RGB) -> np.ndarray:
-    """Pixels inside ``boxes`` that are closer to ``fg`` than to ``bg``."""
-    h, w = crop_bgr.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    fg_bgr = np.array(fg[::-1], dtype=np.float32)
-    bg_bgr = np.array(bg[::-1], dtype=np.float32)
-    for box in boxes:
-        b = _grow(box, _TEXT_PAD, _TEXT_PAD, 10**9, 10**9)
-        x1, y1 = max(0, b.x - origin.x), max(0, b.y - origin.y)
-        x2, y2 = min(w, b.x2 - origin.x), min(h, b.y2 - origin.y)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        region = crop_bgr[y1:y2, x1:x2].astype(np.float32)
-        d_fg = np.linalg.norm(region - fg_bgr, axis=2)
-        d_bg = np.linalg.norm(region - bg_bgr, axis=2)
-        mask[y1:y2, x1:x2] |= (d_fg < d_bg).astype(np.uint8)
-    if mask.any():
-        mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
-    return mask
-
-
-def _erase_in_bubble(img: np.ndarray, rect: Rect, labels: np.ndarray, comp: int, bg: RGB) -> np.ndarray:
-    patch = img[rect.y : rect.y2, rect.x : rect.x2].copy()
-    inside = labels[rect.y : rect.y2, rect.x : rect.x2] == comp
-    patch[inside] = np.array(bg[::-1], dtype=np.uint8)
-    return patch
-
-
-def _erase_open(img: np.ndarray, rect: Rect, boxes: Sequence[Rect], fg: RGB, bg: RGB) -> Tuple[np.ndarray, bool]:
-    """Erase glyph strokes inside ``rect``.  Returns ``(patch, flat)`` where
-    ``flat`` tells whether the surroundings were a plain colour (then the
-    strokes were simply painted over) or artwork (then they were inpainted
-    and the translation should carry a halo)."""
-    crop = img[rect.y : rect.y2, rect.x : rect.x2]
-    strokes = _stroke_mask(crop, boxes, rect, fg, bg)
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    rest = gray[strokes == 0]
-    flat = rest.size == 0 or float(rest.std()) < _FLAT_STD
-    if flat:
-        patch = crop.copy()
-        patch[strokes > 0] = np.array(bg[::-1], dtype=np.uint8)
-        return patch, True
-    return cv2.inpaint(crop, strokes, _INPAINT_RADIUS, cv2.INPAINT_TELEA), False
-
-
 # ------------------------------------------------------------ blocks
+def _solidity(region: np.ndarray, area: int) -> float:
+    """Area of the paper component over the area of its convex hull."""
+    contours, _ = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0
+    hull = cv2.convexHull(np.concatenate(contours))
+    hull_area = float(cv2.contourArea(hull))
+    return area / hull_area if hull_area > 0 else 0.0
+
+
 def _make_block(
     img: np.ndarray,
     lines: List[_Line],
@@ -304,7 +338,13 @@ def _make_block(
     text = _ordered_text(members, vertical)
     source_rect = _union([l.bbox for l in members + furigana])
     quad = _rect_quad(source_rect)
-    fg, bg = extract_colors(img, quad)
+    # The block's colours are the medians of its lines' (measured once in
+    # build_blocks); re-clustering the union quad gave the same answer for
+    # single-colour blocks at 0.6 ms a block.
+    fg = tuple(int(v) for v in np.median([l.fg for l in members], axis=0))
+    bg = tuple(int(v) for v in np.median([l.bg for l in members], axis=0))
+    if _luma(fg) < _FG_SNAP_LUMA:
+        fg = (0, 0, 0)
     dark = _luma(bg) < 128.0
     angle = 0.0
     if not vertical:
@@ -316,6 +356,12 @@ def _make_block(
     comp = maps.label_at(dark, members[0].bbox)
     cx, cy, cw, ch, carea = (int(v) for v in stats[comp][:5])
     comp_rect = Rect(cx, cy, cw, ch)
+    if comp > 0 and cw <= source_rect.w + 2 * _TEXT_PAD + 2 and ch <= source_rect.h + 2 * _TEXT_PAD + 2:
+        # The component is just the text boxes painted into the paper map
+        # (a backdrop whose grey is neither light nor dark paper): there is
+        # no paper around the text, so it is neither a bubble nor bounded.
+        comp = 0
+    region = (labels[cy : cy + ch, cx : cx + cw] == comp).astype(np.uint8) if comp > 0 else None
     contains = comp_rect.x <= source_rect.x + 2 and comp_rect.y <= source_rect.y + 2 and (
         comp_rect.x2 >= source_rect.x2 - 2 and comp_rect.y2 >= source_rect.y2 - 2
     )
@@ -325,30 +371,41 @@ def _make_block(
         and carea <= _BUBBLE_MAX_AREA_RATIO * max(1, source_rect.w * source_rect.h)
         and cw <= _BUBBLE_MAX_DIM_RATIO * source_rect.w + 2 * glyph
         and ch <= _BUBBLE_MAX_DIM_RATIO * source_rect.h + 2 * glyph
+        and _solidity(region, carea) >= _BUBBLE_MIN_SOLIDITY
     )
 
     layout_box: Rect
     layout_mask: Optional[np.ndarray] = None
-    clean_rect = _grow(source_rect, _TEXT_PAD + 1, _TEXT_PAD + 1, width, height)
-    outline = False
+    layout_seed: Optional[Rect] = None
     bubble: Optional[Rect] = None
+    em = float(np.median([l.em for l in members]))
     if is_bubble:
-        margin = max(3, int(round(_BUBBLE_MARGIN * glyph)))
-        region = (labels[cy : cy + ch, cx : cx + cw] == comp).astype(np.uint8)
+        margin = max(3, int(round(_BUBBLE_MARGIN_EM * em)))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1))
-        eroded = cv2.erode(region, kernel).astype(bool)
+        # An explicit zero border: the component always touches its own
+        # bounding box, and OpenCV's default border would leave those edges
+        # (a caption box's outer sides) un-eroded, centring the text off.
+        eroded = cv2.erode(region, kernel, borderValue=0).astype(bool)
         if eroded.any():
             layout_box = comp_rect
             layout_mask = eroded
             bubble = comp_rect
-            clean_patch = _erase_in_bubble(img, clean_rect, labels, comp, bg)
         else:
             is_bubble = False
     if not is_bubble:
-        layout_box = _grow(source_rect, _OPEN_EXPAND_X * glyph, _OPEN_EXPAND_Y * glyph, width, height)
-        boxes = [l.bbox for l in members + furigana]
-        clean_patch, flat = _erase_open(img, clean_rect, boxes, fg, bg)
-        outline = not flat
+        # Free text: the seed is where it was, the box how far it may reach
+        # without placement data (see the module docstring, step 6).
+        layout_seed = _grow(source_rect, _OPEN_SEED_X * glyph, _OPEN_SEED_Y * glyph, width, height)
+        limit_x = max(_OPEN_LIMIT_X * source_rect.w, _OPEN_LIMIT_MIN_X * glyph)
+        layout_box = _grow(source_rect, limit_x, _OPEN_LIMIT_Y * glyph, width, height)
+        if comp > 0 and contains:
+            # On paper bounded by an outline (a face, a panel edge): the
+            # mask tells the placement which part of the box is that paper.
+            layout_mask = labels[layout_box.y : layout_box.y2, layout_box.x : layout_box.x2] == comp
+            # The text itself was painted into the paper map; make sure the
+            # seed is entirely usable even if the map missed a glyph.
+            sy, sx = layout_seed.y - layout_box.y, layout_seed.x - layout_box.x
+            layout_mask[sy : sy + layout_seed.h, sx : sx + layout_seed.w] = True
 
     style = SegmentStyle(
         fg=fg,
@@ -359,15 +416,14 @@ def _make_block(
         layout_box=layout_box,
         layout_mask=layout_mask,
         upright=True,
-        clean_patch=clean_patch,
-        clean_rect=clean_rect,
-        outline=outline,
-        max_font_px=_MAX_FONT_RATIO * glyph,
+        max_font_px=_MAX_FONT_RATIO * em,
         source_quads=np.stack([l.seg.quad for l in members]).astype(np.float32),
+        layout_seed=layout_seed,
+        in_bubble=is_bubble,
     )
     confidence = min(l.seg.confidence for l in members)
     segment = Segment(text=text, quad=quad, confidence=confidence, lang_hint=members[0].seg.lang_hint)
-    return TextBlock(segment, style, [l.seg for l in members], [l.seg for l in furigana], bubble)
+    return TextBlock(segment, style, [l.seg for l in members], [l.seg for l in furigana], bubble, em)
 
 
 def _split_shared_bubbles(blocks: List[TextBlock]) -> None:
@@ -397,11 +453,48 @@ def _split_shared_bubbles(blocks: List[TextBlock]) -> None:
             b.style.layout_mask = b.style.layout_mask & (owner == i)
 
 
-def build_blocks(img_bgr: np.ndarray, segments: Sequence[Segment]) -> List[TextBlock]:
+def page_em(blocks: Sequence[TextBlock]) -> float:
+    """Median source em of the page's CJK blocks (Latin watermarks and
+    logos do not vote); 0 when there is none."""
+    ems = [b.em_px for b in blocks if b.em_px > 0 and has_cjk(b.segment.text)]
+    if not ems:
+        ems = [b.em_px for b in blocks if b.em_px > 0]
+    return float(np.median(ems)) if ems else 0.0
+
+
+def _uniform_font_sizes(blocks: List[TextBlock]) -> None:
+    """Letter every dialogue block on the page at one size: blocks whose em
+    is within ``_UNIFORM_BAND`` of the page median get the median's ceiling;
+    outliers (titles, sound effects) keep their own."""
+    if len(blocks) < 2:
+        return
+    median = page_em(blocks)
+    if median <= 0:
+        return
+    lo, hi = _UNIFORM_BAND
+    for b in blocks:
+        if lo * median <= b.em_px <= hi * median:
+            b.style.max_font_px = _MAX_FONT_RATIO * median
+
+
+def build_blocks(
+    img_bgr: np.ndarray,
+    segments: Sequence[Segment],
+    all_segments: Optional[Sequence[Segment]] = None,
+    timings: Optional[Dict[str, float]] = None,
+) -> List[TextBlock]:
     """Group ``segments`` (raw OCR lines in the coordinates of ``img_bgr``)
-    into typeset-ready blocks; see the module docstring."""
+    into typeset-ready blocks; see the module docstring.
+
+    ``all_segments`` may carry the OCR lines of *any* confidence (a superset
+    of ``segments``): lines that belong to no block are used by the eraser as
+    evidence of glyphs the confident boxes missed.  ``timings``, when given,
+    receives the milliseconds spent per stage (``group``, ``erase``,
+    ``place``).
+    """
     if not segments:
         return []
+    t0 = time.perf_counter()
     height, width = img_bgr.shape[:2]
     lines = [_line(s, width, height) for s in segments if s.text.strip()]
     lines = [l for l in lines if l.bbox.w > 0 and l.bbox.h > 0]
@@ -424,4 +517,17 @@ def build_blocks(img_bgr: np.ndarray, segments: Sequence[Segment]) -> List[TextB
         furi = [f for m in members for f in furigana_by_main.get(m, [])]
         blocks.append(_make_block(img_bgr, lines, members, furi, maps))
     _split_shared_bubbles(blocks)
+    _uniform_font_sizes(blocks)
+    t1 = time.perf_counter()
+    erase.apply(img_bgr, blocks, all_segments if all_segments is not None else segments, gray=gray)
+    t2 = time.perf_counter()
+    place.prepare(img_bgr, blocks, gray=gray)
+    t3 = time.perf_counter()
+    if timings is not None:
+        timings.update(group=1000 * (t1 - t0), erase=1000 * (t2 - t1), place=1000 * (t3 - t2))
     return blocks
+
+
+# Imported last: both modules refer to TextBlock in annotations only, so the
+# circular import is harmless.
+from . import erase, place  # noqa: E402

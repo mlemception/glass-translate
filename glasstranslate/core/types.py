@@ -116,6 +116,28 @@ class SegmentStyle:
     # Quads of the OCR lines this block was assembled from (N, 4, 2); used by
     # debug views.  None for plain single-line segments.
     source_quads: Optional[np.ndarray] = None
+    # Preferred footprint for text that is not inside a bubble: the renderer
+    # lays the translation out here first and only grows the box (towards
+    # ``layout_box``, which is then the growth limit) when the text would
+    # otherwise have to shrink below a comfortable size.  None = use
+    # ``layout_box`` as is (bubbles: the text is centred in the bubble).
+    layout_seed: Optional["Rect"] = None
+    # True when the block sits in a detected speech bubble / caption box.
+    in_bubble: bool = False
+    # --- free-text placement (optional, filled by ``render/place.prepare``) --
+    # Frame rectangle the lettering of a free-text block may be placed in
+    # (the source text's neighbourhood, bounded by its panel and the page).
+    # ``ink_map`` and ``blocked_map`` are both of shape (search_box.h,
+    # search_box.w) and aligned with it.  None = ``layout_box`` is the only
+    # constraint (the renderer's fallback).
+    search_box: Optional["Rect"] = None
+    # uint8, 1 where the page carries artwork ("ink") that lettering would
+    # hide; the block's own source glyphs count as paper (they are erased).
+    ink_map: Optional[np.ndarray] = None
+    # bool, True where lettering may not go at all: panel borders and other
+    # panels, other blocks' text / bubbles (with a margin) and the half of the
+    # gap between neighbouring blocks that belongs to the neighbour.
+    blocked_map: Optional[np.ndarray] = None
 
     @property
     def is_block(self) -> bool:
@@ -145,6 +167,15 @@ class SegmentStyle:
             outline=self.outline,
             max_font_px=self.max_font_px,
             source_quads=None if self.source_quads is None else self.source_quads + delta,
+            layout_seed=None if self.layout_seed is None else Rect(
+                self.layout_seed.x + dx, self.layout_seed.y + dy, self.layout_seed.w, self.layout_seed.h
+            ),
+            in_bubble=self.in_bubble,
+            search_box=None if self.search_box is None else Rect(
+                self.search_box.x + dx, self.search_box.y + dy, self.search_box.w, self.search_box.h
+            ),
+            ink_map=self.ink_map,
+            blocked_map=self.blocked_map,
         )
 
 
@@ -173,6 +204,14 @@ class TranslatedSegment:
     @property
     def source_text(self) -> str:
         return self.styled.segment.text
+
+    @property
+    def untranslated(self) -> bool:
+        """True when the translation is just the source text (no model for
+        the pair, an all-``<unk>`` result, or source language == target):
+        renderers leave the original pixels alone instead of re-lettering
+        the same text."""
+        return self.translation.strip() == self.source_text.strip()
 
 
 @dataclass

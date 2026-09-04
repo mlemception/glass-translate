@@ -134,7 +134,14 @@ def _footprint(seg: TranslatedSegment) -> Rect:
     """The frame area a live segment depends on: its quad plus, for typeset
     blocks, the layout region (the whole bubble) and the erased patch painted
     under the lettering.  A crop that re-reads the block must cover all of it
-    so the bubble is flood-filled whole."""
+    so the bubble is flood-filled whole.
+
+    Free text may be lettered anywhere inside ``style.search_box`` (up to a
+    few em from the source), i.e. possibly outside this footprint, so a
+    change under the lettering but outside the footprint does not re-read the
+    block.  That is cosmetic only (the glass is excluded from capture, so the
+    lettering never feeds back into OCR) and the search box is far too large
+    to serve as a crop trigger, so it is deliberately left out."""
     box = seg.styled.segment.bbox
     for extra in (seg.style.layout_box, seg.style.clean_rect):
         if extra is not None:
@@ -586,6 +593,18 @@ class Pipeline(threading.Thread):
         needs (layout region, clean patch, halo flag...)."""
         from ..render.layout import build_blocks
 
+        # TODO(low-confidence lines): ``build_blocks`` takes an optional
+        # ``all_segments`` - the OCR lines of *any* confidence, a superset of
+        # ``segments`` - so the eraser can use the boxes the confidence filter
+        # dropped as evidence of glyphs (``demo/typeset_dev.py`` passes them).
+        # ``RapidOCREngine.recognize`` drops lines below ``cfg.min_confidence``
+        # itself (and RapidOCR's ``Global.text_score`` is set to the same
+        # value), so only confident lines ever reach this point.  To thread
+        # them through: have the engine return every line, keep the confident
+        # subset for grouping/translation and call
+        # ``build_blocks(frame.image, confident, all_segments=every_line)``.
+        # ``erase.apply`` currently ignores the extra lines (its column sweep
+        # completes glyphs from the ink alone), so nothing is lost today.
         blocks = build_blocks(frame.image, segments) if segments else []
         return [b.segment for b in blocks], [b.style for b in blocks]
 
