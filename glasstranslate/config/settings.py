@@ -26,7 +26,28 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def user_data_dir() -> Path:
+    """Per-user writable data directory (downloaded models, logs).
+
+    ``%LOCALAPPDATA%/GlassTranslate`` on Windows; next to the config file
+    elsewhere.  Used by the packaged build, whose ``project_root()`` is the
+    PyInstaller extraction directory and vanishes at exit.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "GlassTranslate"
+    return default_config_path().parent
+
+
 def default_models_dir() -> Path:
+    """Where Argos packages are installed by default.
+
+    A source checkout uses ``<project>/models``; the frozen exe
+    (``sys.frozen``) uses :func:`user_data_dir` because its project root is
+    a temporary ``_MEI*`` directory.
+    """
+    if getattr(sys, "frozen", False):
+        return user_data_dir() / "models"
     return project_root() / "models"
 
 

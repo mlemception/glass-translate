@@ -1,0 +1,5 @@
+# Extra tools for the one-command Windows build (build.py); install on top of requirements.txt:
+#   .venv\Scripts\python -m pip install -r requirements-build.txt
+pyinstaller>=6.22
+pefile>=2024.8
+pillow>=10

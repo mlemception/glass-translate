@@ -1,0 +1,6 @@
+GlassTranslate onefile bundle marker.
+
+PyInstaller extracts the onefile bundle into %TEMP%\_MEIxxxxxx on every launch and removes it only
+on a normal exit. run.py (frozen branch) sweeps every %TEMP%\_MEI* directory that contains this
+file and is not the running process's own sys._MEIPASS, so a Task-Manager kill or a crash does not
+leave ~360 MB behind. Never delete or rename this file: the spec bundles it at the bundle root.

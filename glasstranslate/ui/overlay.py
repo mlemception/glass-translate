@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, Slot, QThread
+from PySide6.QtCore import QFile, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, Signal, Slot, QThread
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -151,18 +151,39 @@ def _hwnd(widget: QWidget) -> "_wt.HWND":
     return _wt.HWND(int(widget.winId()))
 
 
+def _resource_bytes(path: str) -> Optional[bytes]:
+    """Contents of a Qt resource (``:/fonts/...``), or None when it is not compiled in."""
+    f = QFile(path)
+    if not f.open(QIODevice.OpenModeFlag.ReadOnly):
+        return None
+    try:
+        return bytes(f.readAll().data())
+    finally:
+        f.close()
+
+
 def load_manga_font() -> Optional[str]:
     """Register the bundled Anime Ace files with Qt (once) and return the
     family name, or None when the files are missing or Qt rejected them.
-    Needs a ``QGuiApplication``."""
+
+    The fonts are read from the compiled Qt resources (``:/fonts/``, see
+    ``tools/build_resources.py``) so the packaged exe needs no loose files;
+    a source checkout without the generated resources falls back to the
+    ``.ttf`` files next to the PIL renderer.  Needs a ``QGuiApplication``."""
     global _manga_font_family
     if _manga_font_family is not None:
         return _manga_font_family
     for name in _MANGA_FONT_FILES:
-        path = os.path.join(_MANGA_FONT_DIR, name)
-        if not os.path.exists(path):
+        data = _resource_bytes(f":/fonts/{name}")
+        if data is None:
+            path = os.path.join(_MANGA_FONT_DIR, name)
+            if not os.path.exists(path):
+                continue
+            with open(path, "rb") as fh:
+                data = fh.read()
+        if not data:
             continue
-        font_id = QFontDatabase.addApplicationFont(path)
+        font_id = QFontDatabase.addApplicationFontFromData(data)
         families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
         if families:
             _manga_font_family = str(families[0])

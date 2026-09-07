@@ -1,0 +1,40 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/qml">
+    <file alias="FocusRing.qml">qml/FocusRing.qml</file>
+    <file alias="FormRow.qml">qml/FormRow.qml</file>
+    <file alias="GlassButton.qml">qml/GlassButton.qml</file>
+    <file alias="GlassCard.qml">qml/GlassCard.qml</file>
+    <file alias="GlassComboBox.qml">qml/GlassComboBox.qml</file>
+    <file alias="GlassFontComboBox.qml">qml/GlassFontComboBox.qml</file>
+    <file alias="GlassScrollBar.qml">qml/GlassScrollBar.qml</file>
+    <file alias="GlassSegmentedBar.qml">qml/GlassSegmentedBar.qml</file>
+    <file alias="GlassShadow.qml">qml/GlassShadow.qml</file>
+    <file alias="GlassSlider.qml">qml/GlassSlider.qml</file>
+    <file alias="GlassStepper.qml">qml/GlassStepper.qml</file>
+    <file alias="GlassSurface.qml">qml/GlassSurface.qml</file>
+    <file alias="GlassTextField.qml">qml/GlassTextField.qml</file>
+    <file alias="GlassToggle.qml">qml/GlassToggle.qml</file>
+    <file alias="Glyph.qml">qml/Glyph.qml</file>
+    <file alias="Main.qml">qml/Main.qml</file>
+    <file alias="StatusStrip.qml">qml/StatusStrip.qml</file>
+    <file alias="Theme.qml">qml/Theme.qml</file>
+    <file alias="TitleBar.qml">qml/TitleBar.qml</file>
+    <file alias="WindowMenu.qml">qml/WindowMenu.qml</file>
+    <file alias="pages/EnginesPage.qml">qml/pages/EnginesPage.qml</file>
+    <file alias="pages/HotkeysPage.qml">qml/pages/HotkeysPage.qml</file>
+    <file alias="pages/OverlayPage.qml">qml/pages/OverlayPage.qml</file>
+    <file alias="pages/TranslatePage.qml">qml/pages/TranslatePage.qml</file>
+    <file alias="qmldir">qml/qmldir</file>
+    <file alias="shaders/blur.frag.qsb">qml/shaders/blur.frag.qsb</file>
+    <file alias="shaders/glass.frag.qsb">qml/shaders/glass.frag.qsb</file>
+    <file alias="shaders/shadow.frag.qsb">qml/shaders/shadow.frag.qsb</file>
+  </qresource>
+  <qresource prefix="/fonts">
+    <file alias="animeace2_ital.ttf">../render/fonts/animeace/animeace2_ital.ttf</file>
+    <file alias="animeace2_reg.ttf">../render/fonts/animeace/animeace2_reg.ttf</file>
+  </qresource>
+  <qresource prefix="/icons">
+    <file alias="app.png">icons/app.png</file>
+  </qresource>
+</RCC>
