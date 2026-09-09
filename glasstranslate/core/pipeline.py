@@ -69,6 +69,10 @@ _MAX_CROPS = 6
 # Back-off after an exception / failed engine construction.
 _ERROR_SLEEP_S = 0.5
 _ENGINE_RETRY_S = 5.0
+# ``stop()`` runs on the GUI thread (window close), so it may only wait this
+# long for a worker stuck in an uninterruptible call (a LibreTranslate request
+# in flight, a CTranslate2 model load); the daemon worker drains on its own.
+_STOP_JOIN_GRACE_S = 0.25
 # Languages whose script is unmistakable; a segment detected as one of these
 # keeps its own language even when the page's dominant language differs.
 _SCRIPT_LANGUAGES = frozenset({"ja", "ko", "zh", "ru", "ar", "el", "th", "he"})
@@ -286,8 +290,15 @@ class Pipeline(threading.Thread):
     def paused(self) -> bool:
         return not self._running.is_set()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Ask the worker to finish, wait for it and release the engines."""
+    def stop(self, timeout: float = _STOP_JOIN_GRACE_S) -> None:
+        """Ask the worker to finish, wait for it and release the engines.
+
+        Runs on the GUI thread at window close, so the default grace is short:
+        a pass stuck in an uninterruptible call (LibreTranslate request in
+        flight, CTranslate2 model load) must not freeze the UI.  When the join
+        times out the daemon worker keeps draining and ``run()`` releases the
+        engines as it exits; process exit does not wait for daemon threads.
+        """
         self._stop_event.set()
         self._running.set()
         if self.is_alive() and threading.current_thread() is not self:
@@ -295,8 +306,10 @@ class Pipeline(threading.Thread):
         if self.is_alive() and threading.current_thread() is not self:
             # Still inside a pass (e.g. a slow model load).  Closing engines
             # under the worker would race; run() releases them when it exits.
-            log.warning("pipeline worker did not stop within %.1fs; engines released on exit", timeout)
+            log.warning("pipeline worker did not stop within %.2fs; engines released on exit", timeout)
             return
+        # A successful join means run() already closed the engines on its way
+        # out; this is a no-op safety net for a worker that never started.
         self._close_engines()
 
     def pause(self) -> None:
@@ -670,6 +683,12 @@ class Pipeline(threading.Thread):
             else:
                 misses.setdefault(s.src_lang, []).append(i)
         for src, indices in misses.items():
+            if self._stop_event.is_set():
+                # Shutting down: the results would be discarded, and each batch
+                # can cost a network round-trip or a model load.  stop() is
+                # terminal, so segments this pass dropped from _live are never
+                # observed as missing.
+                break
             texts = [styled[i].segment.text for i in indices]
             translations = self._translator.translate_batch(texts, src, tgt)
             if len(translations) != len(texts):
