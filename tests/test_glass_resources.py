@@ -1,11 +1,14 @@
 """tools/build_resources.py: digest freshness check and the QML import guard (docs/GLASS_DESIGN.md 4)."""
 from __future__ import annotations
 
+import importlib
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
+import pytest
 
 from tools import build_resources as B
 
@@ -92,3 +95,50 @@ def test_resources_load_in_qt(qapp) -> None:
                  ":/qml/shaders/shadow.frag.qsb", ":/fonts/animeace2_reg.ttf", ":/fonts/animeace2_ital.ttf",
                  ":/icons/app.png"):
         assert QFile.exists(path), path
+
+
+# ---------------------------------------------------------------- _ensure_resources self-heal
+def test_ensure_resources_rebuilds_when_digest_stale(resources_built: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A present-but-stale ``resources_rc`` (already imported) must be rebuilt and
+    reloaded, unregistering the old Qt resource data before the reload."""
+    from glasstranslate.ui import control as C
+    from glasstranslate.ui import resources_rc as RC
+
+    build_calls: List[None] = []
+    events: List[str] = []
+
+    def fake_build() -> Path:
+        build_calls.append(None)
+        return B.rc_path()
+
+    def fake_cleanup() -> None:
+        events.append("cleanup")
+
+    def fake_reload(module: object) -> None:
+        events.append("reload")
+
+    monkeypatch.setattr(B, "check_digest", lambda: (False, "stale"))
+    monkeypatch.setattr(B, "build", fake_build)
+    monkeypatch.setattr(RC, "qCleanupResources", fake_cleanup)
+    monkeypatch.setattr(importlib, "reload", fake_reload)
+
+    assert C._ensure_resources() is True
+    assert len(build_calls) == 1
+    assert events == ["cleanup", "reload"]
+
+
+def test_ensure_resources_skips_rebuild_when_digest_fresh(resources_built: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh digest must not trigger a rebuild."""
+    from glasstranslate.ui import control as C
+
+    build_calls: List[None] = []
+
+    def fake_build() -> Path:
+        build_calls.append(None)
+        return B.rc_path()
+
+    monkeypatch.setattr(B, "check_digest", lambda: (True, "digest ok"))
+    monkeypatch.setattr(B, "build", fake_build)
+
+    assert C._ensure_resources() is True
+    assert build_calls == []
