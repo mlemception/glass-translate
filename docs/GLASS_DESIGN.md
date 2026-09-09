@@ -61,22 +61,18 @@ app.py ─ GlassTranslateApp ─┬─ ControlWindow (QQuickView subclass, frame
   (in `app.main`). **No `QQuickStyle` call**: every Glass* control derives from `QtQuick.Templates`
   (§2.3), never from `QtQuick.Controls`.
 - Geometry (§2.1): the visible **slab** is inset in a transparent margin that holds its shadow
-  (left/right 36, top 28, bottom 52 logical px). Default window 832x640 (slab 760x560), minimum window
-  752x560 (slab 680x480), resizable. Title bar is our own (`TitleBar.qml`): drag → `bridge.startMove()`,
-  8-px edges of the **slab rect** → `bridge.startResize(edges)`, buttons minimise/close. The bridge slots
-  call `startSystemMove()` / `startSystemResize(Qt.Edge(edges))` (a `Qt.Edge` enum, not an int) and
-  must run inside the QML `onPressed` handler (they act on the current button press). All hit-testing
-  (title-bar drag, resize edges, `Theme.concentric(radiusWindow, pad)`) is relative to the slab rect,
+  (left/right 36, top 28, bottom 52 logical px). Fixed window size 832x640 (slab 760x560); the window
+  is not resizable (`setMinimumSize == setMaximumSize == 832x640`, no resize edges, no Alt+Space
+  "Size"). Title bar is our own (`TitleBar.qml`): drag → `bridge.startMove()`, calling
+  `startSystemMove()` inside the QML `onPressed` handler (it acts on the current button press). All
+  hit-testing (title-bar drag, `Theme.concentric(radiusWindow, pad)`) is relative to the slab rect,
   not the window; the transparent margin has no MouseArea (Qt has no per-pixel hit-testing, so clicks
   there still land on the window — the margin is as small as the shadow allows). Window icon from
   `:/icons/app.png`.
-- Keyboard window management (a frameless window loses the native Move/Size/system menu): Alt+Space
-  opens our own glass menu (Minimise, Move, Size, Close). Move/Size send `WM_SYSCOMMAND` with
-  `SC_MOVE (0xF010)` / `SC_SIZE (0xF000)` to our hwnd (DefWindowProc keyboard move/size works on
-  frameless windows: arrow keys, Enter/Esc). Win+Arrow snapping / Snap Layouts are documented as
-  unsupported in the README. Optional (verify in `demo/glass_lab.py` before adopting): OR
-  `WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX` into `GWL_STYLE` after `winId()` to restore snapping;
-  keep only if no native frame or corner artefact appears on the translucent window.
+- Keyboard window management (a frameless window loses the native Move/system menu): Alt+Space opens
+  our own glass menu (Minimise, Move, Close — no "Size", the window is fixed-size). Move sends
+  `WM_SYSCOMMAND` with `SC_MOVE (0xF010)` to our hwnd (DefWindowProc's keyboard move loop: arrow keys,
+  Enter/Esc). Win+Arrow snapping / Snap Layouts are documented as unsupported in the README.
 - After native creation (`showEvent`, re-applied cheaply on every show):
   `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE=0x11)` so the backdrop grab (and the
   pipeline's capture) see *through* the panel. Also `DWMWA_WINDOW_CORNER_PREFERENCE` is not needed
@@ -165,7 +161,7 @@ Item root (window size W x H)                        // root = window; W = slab.
   Item contentLayer (inside slab, margins 14): TitleBar / GlassSegmentedBar / StackLayout pages / StatusStrip
 ```
 Geometry contract: **root = window; `slab` is inset left/right 36, top 28, bottom 52 logical px**
-(default window 832x640 ⇒ slab 760x560; minimum window 752x560 ⇒ slab 680x480). Everything
+(fixed window size 832x640 ⇒ slab 760x560). Everything
 interactive is laid out and hit-tested relative to the slab rect (§1.1). `backdropLayer` keeps
 covering window + MARGIN. **Nothing of the backdrop or the blur intermediates may be composited on
 screen**: every `ShaderEffectSource` in the chain has `hideSource: true` (their `ShaderEffect` sources
@@ -438,8 +434,7 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   `label`/`hint` to the control's `Accessible.name`/`Accessible.description`.
 - `TitleBar.qml`: app name (title size, weight 600) left, optional running dot (accent, 6 px, only
   while running), minimise/close buttons (`variant:"fill"`, 28 px). `MouseArea` → `bridge.startMove()`
-  in `onPressed` (double-click does nothing). Resize edges live in `Main.qml`
-  (`bridge.startResize(edges)` in `onPressed`, edges measured on the slab rect).
+  in `onPressed` (double-click does nothing). The window is fixed-size, so there are no resize edges.
 - `StatusStrip.qml` (bottom, pinned, all tabs): `GlassSurface variant:"fill"` (radius
   `Theme.concentric(Theme.radiusWindow, Theme.pad)` = 8), height ≥ 44. Left: status message
   (`bridge.statusMessage`, elided). Right: `Total 12.3 ms · 8.1 fps` in `Theme.mono` (tabular),
@@ -474,8 +469,8 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   animation moves `Theme.pointer` to `Theme.pointerRest`, so the highlight never freezes at the exit
   point and ends in the ambient-only state; popups are `modal: false` so hover keeps arriving while a
   combo is open. Page switch (`StackLayout` + 160 ms opacity crossfade and 10 px slide in glass mode;
-  instant in reduceMotion), resize edge handlers, `Keys` (Ctrl+1..4 and Ctrl+Tab switch tabs, Esc
-  closes popups, Alt+Space opens the window menu of §1.1).
+  instant in reduceMotion), `Keys` (Ctrl+1..4 and Ctrl+Tab switch tabs, Esc closes popups, Alt+Space
+  opens the window menu of §1.1).
 
 ### 2.4 Motion rules
 - Every spring goes through `Theme` so reduceMotion turns it into a 120 ms OutCubic (no overshoot).
@@ -512,10 +507,10 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   else 0..100), `backdropSerial`, `backdropOrigin`, `backdropLuma`, `inkPolarity` (§1.2), `windowTitle`.
 - Slots: `startStop(bool)`, `grabMode()`, `toggleGlass()`, `browseModelsDir()`,
   `downloadModel(bool sugoi)`, `hideDownload()`, `setHotkey(str which, str text) -> bool`,
-  `startMove()` → `startSystemMove()`, `startResize(int edges)` → `startSystemResize(Qt.Edge(edges))`
-  (both only valid from a QML `onPressed`), `minimize()` → `showMinimized()`, `close()` →
-  `ControlWindow.close()` (the `QWindow` close, so `closeEvent` flushes the pending save and emits
-  `closed`), `openLogs()` (not required).
+  `startMove()` → `startSystemMove()` (only valid from a QML `onPressed`), `startResize(int edges)`
+  (no-op — the window is fixed-size; kept so old/cached QML cannot crash calling it), `minimize()` →
+  `showMinimized()`, `close()` → `ControlWindow.close()` (the `QWindow` close, so `closeEvent` flushes
+  the pending save and emits `closed`), `openLogs()` (not required).
 - `setHotkey(which, text)`: `text.strip() == ""` → revert the field to the current value silently (no
   status; `normalize_hotkey("")` raises); otherwise store `normalize_hotkey(text)` and the field
   displays the normalized form; `ValueError` → status `f"Invalid hotkey {text!r}: {exc}"`, return False.
@@ -689,7 +684,7 @@ the CPU-only translation, and that Win+Arrow snapping is unsupported (§1.1).
   white window and over a dark one), highlight follows the pointer while it is *over* the slab and
   fades to ambient when it leaves. One extra pass under `QT_SCALE_FACTOR=1.5` and one with
   `GLASSTRANSLATE_APPEARANCE=textscale=150`: edge line 1 device px, `rect` alignment ≤ 1 px
-  (quick-shaders method), no clipped text, no layout overflow at slab 680x480.
+  (quick-shaders method), no clipped text, no layout overflow at slab 760x560.
 - Performance (budgets; measured values from the review probes in parentheses): idle ≤ 3 % of one
   core with a static desktop (2.0 %), ≤ 12 % with the desktop changing under the panel (4.7 %),
   pointer moving over the panel ≤ 15 % at vsync (8.6 % for 13 glass items at 240 Hz), grabber median

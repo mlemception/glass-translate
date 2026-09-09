@@ -11,9 +11,9 @@ and ``demo/output/probes/review/qtquick`` (see the reports next to them):
 * :func:`physical_rect` - the window rectangle in **physical** virtual-screen
   pixels from ``GetWindowRect`` (what mss expects), with a DPR-scaled
   ``frameGeometry()`` fallback that agrees exactly at DPR 1.0 and 2.0.
-* :func:`keyboard_move` / :func:`keyboard_size` - post ``WM_SYSCOMMAND`` with
-  ``SC_MOVE`` / ``SC_SIZE`` so ``DefWindowProc`` runs its keyboard move / size
-  loop (arrow keys, Enter, Esc) on a window that has no native title bar.
+* :func:`keyboard_move` - posts ``WM_SYSCOMMAND`` with ``SC_MOVE`` so
+  ``DefWindowProc`` runs its keyboard move loop (arrow keys, Enter, Esc)
+  on a window that has no native title bar.
 
 On other platforms every function degrades to a no-op / Qt fallback.
 """
@@ -37,7 +37,6 @@ __all__ = [
     "exclude_from_capture",
     "hwnd_of",
     "keyboard_move",
-    "keyboard_size",
     "physical_rect",
 ]
 
@@ -136,11 +135,6 @@ def _post_syscommand(window: QWindow, command: int) -> bool:
 def keyboard_move(window: QWindow) -> bool:
     """Start the system keyboard move loop (arrow keys, Enter / Esc)."""
     return _post_syscommand(window, SC_MOVE)
-
-
-def keyboard_size(window: QWindow) -> bool:
-    """Start the system keyboard size loop (arrow keys pick an edge)."""
-    return _post_syscommand(window, SC_SIZE)
 
 
 def dpi_awareness() -> Optional[int]:

@@ -116,8 +116,7 @@ CUDA_FROZEN_HINT = "CUDA is not available in the packaged build; translation run
 
 WINDOW_TITLE = "GlassTranslate"
 MAIN_QML_URL = "qrc:/qml/Main.qml"
-WINDOW_DEFAULT_SIZE = QSize(832, 640)  # slab 760x560 inside the 36/28/36/52 shadow margin
-WINDOW_MIN_SIZE = QSize(752, 560)  # slab 680x480
+WINDOW_DEFAULT_SIZE = QSize(832, 640)  # slab 760x560 inside the 36/28/36/52 shadow margin; fixed-size, not resizable
 WINDOW_FLAGS = (
     Qt.WindowType.Window
     | Qt.WindowType.FramelessWindowHint
@@ -846,9 +845,8 @@ class ControlBridge(QObject):
 
     @Slot(int)
     def startResize(self, edges: int) -> None:
-        """System resize along ``Qt.Edge`` flags; only valid from a QML ``onPressed`` handler."""
-        if self._window is not None and edges:
-            self._window.startSystemResize(Qt.Edge(int(edges)))
+        """No-op: the window is fixed-size.  Kept so old/cached QML never crashes calling it."""
+        return
 
     @Slot()
     def keyboardMove(self) -> None:
@@ -858,9 +856,8 @@ class ControlBridge(QObject):
 
     @Slot()
     def keyboardSize(self) -> None:
-        """Alt+Space menu "Size": DefWindowProc's keyboard size loop."""
-        if self._window is not None:
-            win32.keyboard_size(self._window)
+        """No-op: the window is fixed-size, so there is no keyboard size loop to start."""
+        return
 
     @Slot()
     def minimize(self) -> None:
@@ -906,7 +903,8 @@ class ControlWindow(QQuickView):
         self.setFlags(WINDOW_FLAGS)
         self.setColor(Qt.GlobalColor.transparent)
         self.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
-        self.setMinimumSize(WINDOW_MIN_SIZE)
+        self.setMinimumSize(WINDOW_DEFAULT_SIZE)
+        self.setMaximumSize(WINDOW_DEFAULT_SIZE)
         self.resize(WINDOW_DEFAULT_SIZE)
         if RESOURCES_OK:
             self.setIcon(QIcon(":/icons/app.png"))

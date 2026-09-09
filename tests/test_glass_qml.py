@@ -63,11 +63,37 @@ def test_window_loads_clean(window: C.ControlWindow) -> None:
     assert window.qml_warnings == []
     assert window.rootObject() is not None
     assert window.flags() & C.Qt.WindowType.FramelessWindowHint
-    assert window.minimumSize().width() == 752 and window.minimumSize().height() == 560
+    assert window.minimumSize().width() == 832 and window.minimumSize().height() == 640
     assert window.size().width() == 832 and window.size().height() == 640
     assert window.rootContext().contextProperty("bridge") is window.bridge
     assert window.rootContext().contextProperty("appearance") is window.appearance
     assert window.engine().imageProvider("backdrop") is not None
+
+
+def test_window_is_fixed_size(window: C.ControlWindow) -> None:
+    """min == max == default: no affordance can resize the window (see docs/GLASS_DESIGN.md §1.1)."""
+    assert window.minimumSize() == window.maximumSize() == C.WINDOW_DEFAULT_SIZE
+
+
+def test_start_resize_does_not_start_a_system_resize(window: C.ControlWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[int] = []
+    monkeypatch.setattr(window, "startSystemResize", lambda edges: calls.append(edges))
+    window.bridge.startResize(int(C.Qt.Edge.LeftEdge.value))
+    assert calls == []
+
+
+def _walk_items(item: QQuickItem):
+    yield item
+    for child in item.childItems():
+        yield from _walk_items(child)
+
+
+def test_no_resize_edge_items_in_tree(window: C.ControlWindow) -> None:
+    """No item in the loaded QML tree exposes the ``edges`` property of the old ``ResizeEdge``."""
+    root = window.rootObject()
+    assert root is not None
+    edge_items = [it for it in _walk_items(root) if it.property("edges") is not None]
+    assert edge_items == []
 
 
 @pytest.mark.parametrize("qml", _component_files(), ids=lambda p: p.stem)

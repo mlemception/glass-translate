@@ -7,16 +7,16 @@ import "pages"
     Main - root of the control window (docs/GLASS_DESIGN.md §1.1, §2.1).
 
     root = window.  The visible slab is inset 36 / 28 / 36 / 52 logical px
-    (default window 832x640 -> slab 760x560, minimum 752x560 -> 680x480); the
-    margin holds the slab shadow and nothing else is painted there.
+    (fixed window size 832x640 -> slab 760x560); the margin holds the slab
+    shadow and nothing else is painted there.
     Layers, top to bottom: backdrop image (hidden source of the sharp texture),
     the 1/4-resolution blur chain (every hop hidden), the slab shadow, the
     "regular" glass slab and the content layer (TitleBar, GlassSegmentedBar,
     the four pages, StatusStrip) inset by Theme.pad.
 
     Everything interactive is laid out and hit-tested on the slab rect: the
-    title bar drag and the 8 px resize edges call bridge.startMove() /
-    bridge.startResize(edges) from inside the press.  Keyboard: Ctrl+1..4 and
+    title bar drag calls bridge.startMove() from inside the press (the window
+    is fixed-size, so there are no resize edges).  Keyboard: Ctrl+1..4 and
     Ctrl+Tab / Ctrl+Shift+Tab switch tabs, Esc closes an open popup (handled by
     the popups), Alt+Space opens the window menu.  Theme.pointer follows the
     HoverHandler directly while hovered and glides to Theme.pointerRest in
@@ -242,21 +242,6 @@ Item {
         }
     }
 
-    // ------------------------------------------------------------ resize edges (8 px, on the slab rect)
-    component ResizeEdge: MouseArea {
-        property int edges: 0
-        acceptedButtons: Qt.LeftButton
-        onPressed: bridge.startResize(edges)
-    }
-    ResizeEdge { x: slab.x; y: slab.y + 8; width: 8; height: slab.height - 16; edges: Qt.LeftEdge; cursorShape: Qt.SizeHorCursor }
-    ResizeEdge { x: slab.x + slab.width - 8; y: slab.y + 8; width: 8; height: slab.height - 16; edges: Qt.RightEdge; cursorShape: Qt.SizeHorCursor }
-    ResizeEdge { x: slab.x + 8; y: slab.y; width: slab.width - 16; height: 8; edges: Qt.TopEdge; cursorShape: Qt.SizeVerCursor }
-    ResizeEdge { x: slab.x + 8; y: slab.y + slab.height - 8; width: slab.width - 16; height: 8; edges: Qt.BottomEdge; cursorShape: Qt.SizeVerCursor }
-    ResizeEdge { x: slab.x; y: slab.y; width: 8; height: 8; edges: Qt.LeftEdge | Qt.TopEdge; cursorShape: Qt.SizeFDiagCursor }
-    ResizeEdge { x: slab.x + slab.width - 8; y: slab.y + slab.height - 8; width: 8; height: 8; edges: Qt.RightEdge | Qt.BottomEdge; cursorShape: Qt.SizeFDiagCursor }
-    ResizeEdge { x: slab.x + slab.width - 8; y: slab.y; width: 8; height: 8; edges: Qt.RightEdge | Qt.TopEdge; cursorShape: Qt.SizeBDiagCursor }
-    ResizeEdge { x: slab.x; y: slab.y + slab.height - 8; width: 8; height: 8; edges: Qt.LeftEdge | Qt.BottomEdge; cursorShape: Qt.SizeBDiagCursor }
-
     // ------------------------------------------------------------ keyboard
     function selectPage(index) {
         var n = tabBar.count
@@ -280,7 +265,6 @@ Item {
         objectName: "windowMenu"
         onMinimizeRequested: bridge.minimize()
         onMoveRequested: bridge.keyboardMove()
-        onSizeRequested: bridge.keyboardSize()
         onCloseRequested: bridge.close()
     }
 }

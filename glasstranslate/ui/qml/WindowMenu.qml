@@ -4,16 +4,16 @@ import QtQuick.Templates as T
 
 /*!
     WindowMenu - the Alt+Space replacement for the native system menu of a
-    frameless window (docs/GLASS_DESIGN.md §1.1): Minimise, Move, Size, Close.
-    A T.Menu (keyboard: Up/Down, Enter, Esc) on the same near-opaque sheet as
-    the combo popup.  Main.qml wires the signals to the bridge.
+    frameless window (docs/GLASS_DESIGN.md §1.1): Minimise, Move, Close (no
+    "Size" - the window is fixed-size).  A T.Menu (keyboard: Up/Down, Enter,
+    Esc) on the same near-opaque sheet as the combo popup.  Main.qml wires the
+    signals to the bridge.
 */
 T.Menu {
     id: menu
 
     signal minimizeRequested()
     signal moveRequested()
-    signal sizeRequested()
     signal closeRequested()
 
     readonly property color sheetFill: Theme.mode === "hc" ? Theme.sysPal.base
@@ -87,6 +87,5 @@ T.Menu {
 
     Entry { text: "Minimise"; onTriggered: menu.minimizeRequested() }
     Entry { text: "Move"; onTriggered: menu.moveRequested() }
-    Entry { text: "Size"; onTriggered: menu.sizeRequested() }
     Entry { text: "Close"; onTriggered: menu.closeRequested() }
 }
