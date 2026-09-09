@@ -466,8 +466,8 @@ def run_c(sb: Sandbox, res: Results, mechanics: bool) -> None:
     kill_when = "after_mei" if mechanics else "report"
     lau = sb.launch("C", AUTOEXIT_C_MS, {"GLASSTRANSLATE_APPEARANCE": "glass"}, kill_when=kill_when)
     if not mechanics:
-        res.add("C", "report appeared before the kill", lau.report is not None and lau.report_wait is not None,
-                f"after {lau.report_wait:.1f} s" if lau.report_wait is not None else lau.error or "no report")
+        res.add("C", "report appeared before the kill", lau.report is not None and lau.report_wait_s is not None,
+                f"after {lau.report_wait_s:.1f} s" if lau.report_wait_s is not None else lau.error or "no report")
     res.add("C", "process tree hard-killed while running", lau.killed and not lau.error,
             (lau.error or _rc_text(lau.returncode)) + f" pids={sb.last_killed_pids}")
     res.add("C", "_MEI left behind by the kill (precondition)", bool(lau.mei_left), ", ".join(lau.mei_left) or "none")

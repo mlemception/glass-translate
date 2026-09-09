@@ -75,7 +75,9 @@ rapidocr_hidden = (
 ctranslate2_bins = collect_dynamic_libs("ctranslate2")  # ctranslate2.dll, libiomp5md.dll (cudnn stub pruned below)
 sentencepiece_datas = collect_data_files("sentencepiece", includes=["package_data/*"])
 py3langid_datas = collect_data_files("py3langid", includes=["data/*"])  # data/model.npz.xz
-extra_hidden = ["mss.windows", "comtypes.gen", "dxcam.processor.numpy_processor"]
+# resources_rc is imported dynamically (importlib) in control.py, invisible to Analysis.
+extra_hidden = ["mss.windows", "comtypes.gen", "dxcam.processor.numpy_processor",
+                "glasstranslate.ui.resources_rc"]
 # Bundle-root marker: run.py sweeps stale %TEMP%\_MEI* dirs that contain it (onefile lifecycle, section 6).
 marker_datas = [(os.path.join(PACKAGING, "gt_bundle.marker"), ".")]
 
