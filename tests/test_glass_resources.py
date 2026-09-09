@@ -91,6 +91,11 @@ def test_cli_check_exit_codes(tmp_path: Path, resources_built: Path) -> None:
 def test_resources_load_in_qt(qapp) -> None:
     from PySide6.QtCore import QFile
 
+    # Registering the resources is an import-time side effect of resources_rc;
+    # in a full-suite run glasstranslate.ui.control happens to import it first,
+    # but a standalone run of this file must register them itself.
+    importlib.import_module("glasstranslate.ui.resources_rc")
+
     for path in (":/qml/Theme.qml", ":/qml/qmldir", ":/qml/shaders/glass.frag.qsb", ":/qml/shaders/blur.frag.qsb",
                  ":/qml/shaders/shadow.frag.qsb", ":/fonts/animeace2_reg.ttf", ":/fonts/animeace2_ital.ttf",
                  ":/icons/app.png"):
