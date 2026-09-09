@@ -77,6 +77,25 @@ class FixedDetector(LanguageDetector):
         return "ja"
 
 
+class StubPackageTranslator(Translator):
+    """Translator exposing ``installed_packages()`` like ``ArgosCT2Translator``."""
+
+    name = "stub"
+    device = "cpu"
+
+    def __init__(self, packages: Optional[list] = None) -> None:
+        self._packages = packages if packages is not None else []
+
+    def supported_pairs(self):
+        return []
+
+    def translate_batch(self, texts: Sequence[str], src: str, tgt: str) -> List[str]:
+        return list(texts)
+
+    def installed_packages(self) -> list:
+        return self._packages
+
+
 def bubble_page() -> tuple[np.ndarray, List[Segment]]:
     """White page with a grey backdrop, one white oval bubble holding two
     vertical text columns, and one free-standing column on the backdrop."""
@@ -233,6 +252,42 @@ def test_unchanged_frame_is_skipped_and_keeps_blocks() -> None:
     stats = pipe.step()
     assert stats is not None and stats.skipped_unchanged
     assert len(results[-1][0]) == 2 and len(ocr.crops) == 1
+
+
+def _engine_test_pipeline(cfg: AppConfig, translator: Translator) -> tuple[Pipeline, List[str]]:
+    statuses: List[str] = []
+    pipe = Pipeline(
+        cfg,
+        region_provider=lambda: Rect(0, 0, W, H),
+        on_result=lambda segments, stats: None,
+        on_status=statuses.append,
+        capture_factory=lambda c: FakeCapture(np.zeros((H, W, 3), np.uint8)),
+        ocr_factory=lambda c: FakeOCR([]),
+        translator_factory=lambda c: translator,
+        detector_factory=FixedDetector,
+    )
+    return pipe, statuses
+
+
+def test_ensure_engines_warns_when_no_translation_packages_installed(tmp_path: Path) -> None:
+    cfg = AppConfig(models_dir=str(tmp_path))
+    pipe, statuses = _engine_test_pipeline(cfg, StubPackageTranslator([]))
+    assert pipe._ensure_engines()
+    assert any("No translation models found" in s and str(tmp_path) in s for s in statuses)
+
+
+def test_ensure_engines_no_warning_when_packages_installed(tmp_path: Path) -> None:
+    cfg = AppConfig(models_dir=str(tmp_path))
+    pipe, statuses = _engine_test_pipeline(cfg, StubPackageTranslator(["ja-en"]))
+    assert pipe._ensure_engines()
+    assert not any("No translation models found" in s for s in statuses)
+
+
+def test_ensure_engines_ok_for_translator_without_installed_packages(tmp_path: Path) -> None:
+    cfg = AppConfig(models_dir=str(tmp_path))
+    pipe, statuses = _engine_test_pipeline(cfg, RecordingTranslator())
+    assert pipe._ensure_engines()
+    assert not any("No translation models found" in s for s in statuses)
 
 
 @pytest.mark.parametrize("manga", [True, False])

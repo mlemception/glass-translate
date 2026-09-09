@@ -494,6 +494,12 @@ class Pipeline(threading.Thread):
                 if old_tr is not None:
                     old_tr.close()
                 self._status(f"Translator: {self._translator.name} on {self._translator.device}")
+                installed = getattr(self._translator, "installed_packages", None)
+                if callable(installed) and not installed():
+                    self._status(
+                        f"No translation models found in {cfg.models_dir} - check the models "
+                        "directory or download a model on the Engines page."
+                    )
         except Exception as exc:
             log.exception("engine construction failed")
             self._status(f"Engine error: {exc}")

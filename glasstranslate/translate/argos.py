@@ -118,10 +118,33 @@ class _LoadedPair:
     target_tokenizer: Any
 
 
+def _read_sugoi_dir(directory: Path) -> Optional[ArgosPackage]:
+    """Recognise the published Sugoi CTranslate2 conversion layout - a plain
+    CTranslate2 directory with no ``metadata.json``, identified by
+    ``model.bin`` plus both SentencePiece models.  Direction is fixed ja->en.
+    (:func:`download_sugoi` writes a ``metadata.json`` for its own installs;
+    this path exists for a manually placed Hugging Face checkout.)"""
+    src_spm = directory / "spm" / "spm.ja.nopretok.model"
+    tgt_spm = directory / "spm" / "spm.en.nopretok.model"
+    if not ((directory / "model.bin").is_file() and src_spm.is_file() and tgt_spm.is_file()):
+        return None
+    return ArgosPackage("ja", "en", directory, None, ".", "spm/spm.ja.nopretok.model", "spm/spm.en.nopretok.model", 10)
+
+
+def _spm_inside(directory: Path, rel: str) -> bool:
+    """True when ``rel`` resolves to a file inside ``directory`` (metadata.json
+    is untrusted: absolute paths and ``..`` must not escape the package)."""
+    try:
+        candidate = (directory / rel).resolve()
+        return candidate.is_file() and candidate.is_relative_to(directory.resolve())
+    except OSError:
+        return False
+
+
 def _read_metadata_dir(directory: Path) -> Optional[ArgosPackage]:
     meta_path = directory / "metadata.json"
     if not meta_path.is_file():
-        return None
+        return _read_sugoi_dir(directory)
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         from_code, to_code = str(meta["from_code"]), str(meta["to_code"])
@@ -134,8 +157,8 @@ def _read_metadata_dir(directory: Path) -> Optional[ArgosPackage]:
     if (directory / "model.bin").is_file():
         src_spm = str(meta.get("source_spm", "sentencepiece.model"))
         tgt_spm = str(meta.get("target_spm", src_spm))
-        if not ((directory / src_spm).is_file() and (directory / tgt_spm).is_file()):
-            log.warning("Ignoring %s: SentencePiece model(s) %s / %s missing", directory, src_spm, tgt_spm)
+        if not (_spm_inside(directory, src_spm) and _spm_inside(directory, tgt_spm)):
+            log.warning("Ignoring %s: SentencePiece model(s) %s / %s missing or outside the package", directory, src_spm, tgt_spm)
             return None
         return ArgosPackage(from_code, to_code, directory, None, ".", src_spm, tgt_spm, priority)
     return None
@@ -218,7 +241,11 @@ class ArgosCT2Translator(Translator):
             return "cpu"
 
     def rescan(self) -> None:
-        """Re-read ``models_dir``; extracted directories win over archives."""
+        """Re-read ``models_dir``; extracted directories win over archives.
+
+        ``models_dir`` itself is also tried as a package directory, so a user
+        who points it straight at a single hand-assembled model (e.g. a Sugoi
+        conversion with no parent folder) is still discovered."""
         found: Dict[Pair, ArgosPackage] = {}
         if self.models_dir.is_dir():
             for archive in sorted(self.models_dir.glob("*.argosmodel")):
@@ -230,6 +257,9 @@ class ArgosCT2Translator(Translator):
                     pkg = _read_metadata_dir(child)
                     if pkg is not None and (pkg.pair not in found or pkg.priority >= found[pkg.pair].priority):
                         found[pkg.pair] = pkg
+            self_pkg = _read_metadata_dir(self.models_dir)
+            if self_pkg is not None and (self_pkg.pair not in found or self_pkg.priority >= found[self_pkg.pair].priority):
+                found[self_pkg.pair] = self_pkg
         with self._lock:
             self._packages = found
         log.info("Argos packages in %s: %s", self.models_dir, sorted(found) or "none")
