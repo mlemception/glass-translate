@@ -54,6 +54,16 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?;:])\s+|(?<=[。！？；])|\n+")
 # Languages written without inter-word spaces; chunks are re-joined without one.
 _NO_SPACE_LANGS = frozenset({"ja", "zh", "zt", "th"})
 
+# Error messages meaning the GPU stack itself is unusable (the frozen exe
+# ships no cuBLAS/cuDNN, or there is no working CUDA driver).  Only these
+# trigger the permanent CPU fallback; a transient error on one batch must not
+# downgrade the whole session.
+_GPU_UNUSABLE = re.compile(
+    r"is not found|cannot be loaded|cannot open shared object"
+    r"|no cuda-capable device|driver version|cuda driver",
+    re.IGNORECASE,
+)
+
 Pair = Tuple[str, str]
 ProgressCallback = Callable[[int, Optional[int]], None]
 
@@ -300,11 +310,20 @@ class ArgosCT2Translator(Translator):
 
     def close(self) -> None:
         with self._lock:
-            for pair in self._loaded.values():
-                unload = getattr(pair.translator, "unload_model", None)
-                if callable(unload):
+            self._unload_all_locked()
+
+    def _unload_all_locked(self) -> None:
+        """Release every loaded model.  Caller holds ``self._lock``.  A failed
+        ``unload_model`` (e.g. on a half-initialised CUDA context) must not
+        stop the others from being released."""
+        for pair in self._loaded.values():
+            unload = getattr(pair.translator, "unload_model", None)
+            if callable(unload):
+                try:
                     unload()
-            self._loaded.clear()
+                except Exception:
+                    log.exception("unload_model failed; continuing")
+        self._loaded.clear()
 
     # -------------------------------------------------------------- routing
     def _route(self, src: str, tgt: str) -> Optional[List[Pair]]:
@@ -328,6 +347,16 @@ class ArgosCT2Translator(Translator):
             loaded = self._load_models(pkg)
             self._loaded[pair] = loaded
             return loaded
+
+    def _reload_on_cpu(self, pair: Pair) -> _LoadedPair:
+        """A CUDA device can pass detection yet fail on the first real batch
+        (the frozen exe ships no cuBLAS: ``Library cublas64_12.dll is not
+        found``).  Drop every GPU model and continue on the CPU for the rest
+        of this translator's life."""
+        with self._lock:
+            self.device = "cpu"
+            self._unload_all_locked()
+        return self._get_loaded(pair)
 
     def _load_models(self, pkg: ArgosPackage) -> _LoadedPair:
         import sentencepiece  # lazy: keep import cost off the UI thread's startup
@@ -391,9 +420,18 @@ class ArgosCT2Translator(Translator):
             batch.extend(chunks)
         if not batch:
             return texts
-        results = loaded.translator.translate_batch(
-            batch, beam_size=_BEAM_SIZE, max_decoding_length=_MAX_DECODING_LENGTH
-        )
+        try:
+            results = loaded.translator.translate_batch(
+                batch, beam_size=_BEAM_SIZE, max_decoding_length=_MAX_DECODING_LENGTH
+            )
+        except Exception as exc:
+            if self.device == "cpu" or not _GPU_UNUSABLE.search(str(exc)):
+                raise
+            log.warning("Translation on %s failed (%s); falling back to CPU", self.device, exc)
+            loaded = self._reload_on_cpu((src, tgt))
+            results = loaded.translator.translate_batch(
+                batch, beam_size=_BEAM_SIZE, max_decoding_length=_MAX_DECODING_LENGTH
+            )
         decoded = [loaded.target_tokenizer.decode(r.hypotheses[0]) for r in results]
         joiner = "" if tgt in _NO_SPACE_LANGS else " "
         out = list(texts)
