@@ -119,9 +119,12 @@ PLUGIN_KEEP = {
     "plugins/imageformats/qjpeg.dll", "plugins/imageformats/qico.dll", "plugins/imageformats/qgif.dll",
     "plugins/imageformats/qwebp.dll",
 }
-# PySide6's own libcrypto-3.dll / libssl-3.dll (QtNetwork TLS plugin) are dropped; CPython's libcrypto-3-x64.dll /
-# libssl-3-x64.dll (no match: the regex is anchored on "-3.dll") stay for urllib https (LibreTranslate backend).
-NON_QT_DROP = re.compile(r"^(opengl32sw|libcrypto-3|libssl-3|av(codec|format|util)-\d+|sw(scale|resample)-\d+)\.dll$", re.I)
+# PySide6's own OpenSSL copies (QtNetwork TLS plugin) are dropped under PySide6/ only.  CPython 3.13 ships its
+# OpenSSL as DLLs/libcrypto-3.dll + libssl-3.dll (NOT the "-x64" names an older comment assumed): dropping them
+# by basename left _ssl.pyd unloadable -> "SSL module is not available" -> no https at all in the exe (manga-ocr
+# download, Gemini, LibreTranslate over https).  Caught by smoke run D on 2026-09-10; run A now asserts ssl_ok.
+PYSIDE_DROP = re.compile(r"^(opengl32sw|libcrypto-3[^\/]*|libssl-3[^\/]*|av(codec|format|util)-\d+|sw(scale|resample)-\d+)\.dll$", re.I)
+NON_QT_DROP = re.compile(r"^(opengl32sw|av(codec|format|util)-\d+|sw(scale|resample)-\d+)\.dll$", re.I)
 DEPS_DROP = re.compile(
     r"(^|[\\/])(opencv_videoio_ffmpeg\d+_64\.dll|cv2[\\/]data[\\/].*|PIL[\\/]_avif[^\\/]*\.pyd|PIL[\\/]_imagingtk[^\\/]*\.pyd"
     r"|onnxruntime[\\/](datasets|tools)[\\/].*|nvidia[\\/].*|ctranslate2[\\/]cudnn64_9\.dll)$",
@@ -145,7 +148,7 @@ def keep(entry):
         m = re.match(r"^(Qt6[A-Za-z0-9_]+)\.dll$", rel)
         if m:
             return m.group(1) in QT_DLL_KEEP
-        return not NON_QT_DROP.match(rel)
+        return not PYSIDE_DROP.match(rel)
     return not NON_QT_DROP.match(os.path.basename(dest))
 
 

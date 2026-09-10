@@ -239,9 +239,14 @@ class Pipeline(threading.Thread):
             self._invalidate_requested = True
 
     def refresh_models(self) -> None:
-        """Rebuild the translator so newly installed packages are picked up."""
+        """Rebuild the translator and the OCR chain so newly installed packages are picked up.
+
+        The OCR rebuild matters for the manga-ocr bundle: without it the fallback chain only
+        comes back to the primary on its next timed re-probe, which needs a pass to run.
+        """
         with self._lock:
             self._rebuild_translator = True
+            self._rebuild_ocr = True
 
     # ---------------------------------------------------------------- loop
     def run(self) -> None:  # noqa: D401 - Thread API

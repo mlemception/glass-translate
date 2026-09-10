@@ -187,6 +187,17 @@ def test_changing_models_dir_rebuilds_the_ocr_engine(tmp_path: Any) -> None:
     assert pipe._rebuild_ocr
 
 
+def test_refresh_models_rebuilds_the_ocr_chain_as_well_as_the_translator() -> None:
+    """After a model download (``models_changed`` -> ``refresh_models``) the OCR chain must be rebuilt
+    right away so manga-ocr takes over without waiting for the fallback chain's next timed re-probe."""
+    img = np.zeros((H, W, 3), np.uint8)
+    pipe, _, _ = plain_pipeline(NamedOCR("fake", []), img)
+    assert pipe._ensure_engines() and not pipe._rebuild_ocr and not pipe._rebuild_translator
+    pipe.refresh_models()
+    assert pipe._rebuild_ocr and pipe._rebuild_translator
+    assert pipe._ensure_engines() and not pipe._rebuild_ocr and not pipe._rebuild_translator
+
+
 # ------------------------------------------------------------ furigana in plain mode
 def test_plain_mode_strips_furigana_on_the_paddleocr_path() -> None:
     img, segs = page_with_ruby()

@@ -95,3 +95,6 @@ class MangaOcrDownloadWorker(QThread):
         except (ModelDownloadError, ValueError, OSError) as exc:
             log.warning("manga-ocr download failed: %s", exc)
             self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - a dying QThread would leave the progress row stuck forever
+            log.exception("manga-ocr download crashed")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
