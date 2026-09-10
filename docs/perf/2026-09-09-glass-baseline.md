@@ -53,7 +53,23 @@ drag, same machine); isolated spring measurements with a throwaway sampler that 
 | d | drag 56 % / tabs 17 % / idle 2.3 % of one core | drag 48 % / tabs 29 % / idle 2.3 % | Run-to-run noise for tabs (17–29 % across baseline runs); no regression. |
 | e | 44–48 swaps / 200 ms per switch, one 18.9 ms gap | 48 / 48 / 48 / 48 swaps, max gap 8.95 ms, no >2-frame gap | Unchanged, still every refresh. |
 | tail (isolated) | springs running **1313–1322 ms** after the last switch (293–315 swaps) | **983–1061 ms** (220–236 swaps) | −25 %; `epsilon` 0.5 gives the same, 1.0 gives 765 ms but is a visible 1 px snap. The rest is the physical settle of the springs (`Theme.springTrail` 3.0/0.30 oscillates visibly for ~450 ms, then decays): getting under the 180 ms contract needs more damping, i.e. a motion-spec change — **not taken, decision for GATE 2**. |
-| tail (profiler) | 335 swaps, +1393 ms | 338 swaps, +1406 ms | **Open item**: when a drag preceded the switches, rendering continues ~0.45 s *after* every QML animation under the root has stopped (springs stop at +1.0 s, swaps stop at +1.5 s); without the drag the swaps stop with the springs. Not hover (reproduced with the cursor parked off-window), not the grabber (0 frames reach the GUI). Candidates: a Qt-internal animation job (pixmap-cache expiry of the ~160 `image://backdrop/N` entries, async provider loads). Reproduce: drag 240 x 2 px, wait 0.8 s, switch `1,2,3,0` at 400 ms, count `frameSwapped`. |
+| tail (profiler) | 335 swaps, +1393 ms | 338 swaps, +1406 ms | **Resolved 2026-09-10** — environmental, not a Qt-internal job. The profiler/sampler window sat over an animating desktop (the chat client), so the grabber kept delivering frames (`backdropSerial` climbing ~10/s) and each one that moved the luma across the §1.2 threshold flipped `inkPolarity`, which runs the 180 ms `Theme` ink transitions plus a colour Behavior on every control: ≈ 0.33 s of full-rate rendering per flip (reproduced with synthetic frames, grabber stopped). Those bursts, not the springs, extended the swaps to ≈ 1.4–1.5 s after the last switch; the earlier "0 frames reach the GUI" note was wrong for that desktop. With the window over a static desktop the swaps stop when the springs stop (≈ 0.95 s with the old constants, ≈ 0.55 s now), and the render loop is idle (0 swaps) afterwards. Hiding the tab bar, the indicator, the live track source or the whole content, disabling every Behavior, or using the basic render loop never changed the tail, which is what pointed at the backdrop path. |
 
 Idle once settled: 0 swaps, 13 grabs/s (the `GRAB_HZ` cadence; no frame reaches the GUI on a
 static desktop), 2.3 % of one core — inside the §7 idle budget.
+
+## Spring decision (2026-09-10)
+
+Measured on screen over a static desktop (`Theme.springLead/springTrail` overridden at runtime,
+switch 0 → 3 and back, samples every ~4 ms): settle = last moment a spring reports `running`,
+overshoot relative to the travel.
+
+| lead spring/damping | trail | settle | overshoot | note |
+|---|---|---|---|---|
+| 4.6 / 0.36 | 3.0 / 0.30 | 910 ms | 3.0–3.3 % | original |
+| 4.6 / 0.55 | 3.0 / 0.50 | 1376 ms | 0 % | more damping only: slower to reach epsilon |
+| 5.0 / 0.50 | 3.5 / 0.45 | 961 ms | 0 % | |
+| **8.0 / 0.50** | **6.0 / 0.45** | **542 ms** | **0.9–1.2 %** | **adopted: stiffer, still a visible settle** |
+| 10.0 / 0.60 | 7.0 / 0.50 | 494 ms | 0.1–0.4 % | overshoot no longer visible |
+| 12.0 / 0.70 | 8.0 / 0.60 | 546 ms | 0 % | |
+| 15.0 / 0.80 | 10.0 / 0.70 | 577 ms | 0 % | |

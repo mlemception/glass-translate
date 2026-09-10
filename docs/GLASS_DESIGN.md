@@ -362,9 +362,9 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   Motion: `reduceMotion` (from appearance), `springPress {spring: 5, damping: .32}` (press release
   only: 0.3 % overshoot, 226 ms), `springGrab {spring: 5, damping: .38}` (1.28x swell on grab: reaches
   in ~190 ms, 2.8 % overshoot, settled ~260 ms), `springSwell {spring: 3.6, damping: .30}` (release:
-  one visible bounce to 0.985, settled ~390 ms), `springLead {spring: 4.6, damping: .36}`,
-  `springTrail {spring: 3.0, damping: .30}` (measured 3.3 % / 3.0 % overshoot, +28 px stretch at
-  100 ms, settle 348 / 444 ms), `fade 160`. `mode`: "glass" | "solid" | "hc".
+  one visible bounce to 0.985, settled ~390 ms), `springLead {spring: 8.0, damping: .50}`,
+  `springTrail {spring: 6.0, damping: .45}` (2026-09-10: measured 0.9–1.2 % overshoot, the render loop
+  idle ~0.55 s after a switch; the original 4.6/.36 + 3.0/.30 gave 3 % overshoot and ~0.95 s), `fade 160`. `mode`: "glass" | "solid" | "hc".
   `concentric(outerRadius, inset)` = `Math.max(4, outerRadius - inset)`.
   Geometry helpers — the only sanctioned way to compute source rects and pointer positions.
   **Never use `mapToItem`/`mapFromItem` inside a `rect` or `pointer` binding**: such a binding only
@@ -408,8 +408,8 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   **left and right edges animate separately** (`leadEdge` with `springLead`, `trailEdge` with
   `springTrail`, lead = edge in the travel direction) so it stretches toward the destination then
   settles; both springs stop at `epsilon: 0.25` (a quarter logical px — the Qt default 0.01 px kept
-  the whole scene rendering ≈ 1.3 s after each switch, now ≈ 1.0 s; the remainder is `springTrail`'s
-  physical settle, see §2.4). Labels: selected → `Theme.ink`, others `Theme.inkSecondary`; keyboard Left/Right; focus
+  the whole scene rendering ≈ 1.3 s after each switch; with the 2026-09-10 spring values the loop is
+  idle ≈ 0.55 s after a switch, see §2.4). Labels: selected → `Theme.ink`, others `Theme.inkSecondary`; keyboard Left/Right; focus
   ring per the rule above.
 - `GlassButton.qml` (`T.Button`): `text`, `primary` (accent blended at 22 % over the fill),
   `checkable/checked`, `iconGlyph` optional; press → `scale .965` with
@@ -478,8 +478,9 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
     (`GlassTextField` + Browse, always enabled), buttons `Download model…` and `Get Sugoi (ja→en)…`
     (both enabled iff argos — a deliberate change, §3), inline progress row
     (`bridge.downloadActive/Label/Progress`, Hide button); card "Gemini" (F4, `objectName geminiCard`,
-    visible iff `bridge.backendGemini`): Model (`GlassComboBox` over `bridge.geminiModels`, presets +
-    unknown-value rule), API format (`native` / `openai`), Base URL, API key (`GlassTextField password`,
+    visible iff `bridge.backendGemini`): Model (`GlassTextField`, `objectName geminiModelField`, free text so
+    any id a gateway serves can be entered; `bridge.geminiModelPresets` / `geminiModelDefault` feed the hint
+    and placeholder), API format (`native` / `openai`), Base URL, API key (`GlassTextField password`,
     **write-only**: commits through `bridge.setGeminiApiKey(text)` into the user secret store
     `%LOCALAPPDATA%/GlassTranslate/secrets.json`, is cleared after commit and only
     `bridge.geminiApiKeySet` / a redacted `geminiApiKeyHint` are readable), Timeout (1–300 s), Retries
@@ -515,10 +516,13 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
 - Page transition ≤ 180 ms. Nothing loops, nothing animates while idle (the only continuous update
   is the 15 Hz backdrop and that only when the desktop behind changed; the pointer highlight
   re-renders only while the pointer moves over the window).
-- Known gap (measured 2026-09-10, `docs/perf/2026-09-09-glass-baseline.md`): the tab indicator's
-  two springs keep the scene rendering at full refresh for ≈ 1.0 s after a switch (≈ 1.3 s before
-  `epsilon: 0.25`). Getting under the 180 ms line needs more damping on `springLead` /
-  `springTrail`, i.e. a motion-spec change — open decision, not taken in the F2 slice.
+- Tab-indicator settle (2026-09-10, `docs/perf/2026-09-09-glass-baseline.md`): the springs keep the
+  scene rendering at full refresh until they stop — ≈ 0.55 s per switch with the 8.0/.50 + 6.0/.45
+  values above (≈ 0.95 s with the original 4.6/.36 + 3.0/.30; more damping alone does not help, a
+  critically damped spring reaches the 0.25 px epsilon later). The 180 ms line is the page crossfade
+  budget, not the indicator's. Separately, every ink-polarity flip (§1.2) costs ≈ 0.33 s of full-rate
+  rendering (the 180 ms `Theme` ink transitions plus every control's colour Behavior); it fires only
+  when the desktop behind the window changes, e.g. a drag across moving content.
 
 ## 3. Python bridge (`glasstranslate/ui/control.py`)
 
@@ -631,9 +635,14 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   a gate, `compiled` is diagnostic only — per-item status is not reliable even on the real RHI),
   rhi_backend, appearance: {mode, transparency, reduceMotion, highContrast, darkMode, textScale},
   backdrop_serial, backdrop_luma, ink_polarity, fonts_ok ('Anime Ace 2.0 BB' in
-  QFontDatabase.families()), resources_ok: {qml, shaders, fonts, icon}, control_exposed,
+  QFontDatabase.families()), ssl_ok (`import ssl` succeeds - the exe must carry CPython's OpenSSL DLLs or
+  every https path is dead), resources_ok: {qml, shaders, fonts, icon}, control_exposed,
   overlay_shown, pages_ok (every page opened and every Glass* component instantiated),
-  dpi_awareness, status_history[] (every show_status message), screenshot: <png path>}`.
+  dpi_awareness, status_history[] (every show_status message), stats: {totalText, fpsText, stagesText,
+  segmentsText, cacheText, devicesText} (the status-strip texts of the last pipeline pass), screenshot: <png path>,
+  actions: {<name>: {started, finished, seconds, label, progress, models_dir, models_ready_before,
+  models_ready_after}} (only when `GLASSTRANSLATE_SMOKE_ACTIONS` named a whitelisted bridge slot -
+  today just `downloadMangaOcr`; the app reports and quits by itself once the action finishes)}`.
   The grab (`grabWindow()`, saved next to the log) runs from a single-shot timer at
   `AUTOEXIT_MS - 1500` after at least one `frameSwapped`, never from `aboutToQuit` (the window may
   already be unexposed). The assertions live in §6 (`build.py --test`) and §7 (`run.py`, offscreen).
@@ -655,14 +664,23 @@ System32/Windows/Wbem/PowerShell, no `PYTHON*`/`QT_*`/`VIRTUAL_ENV`, no inherite
   (do not assert `compiled == total`: an item sharing a `.qsb` can report Uncompiled while its pixels
   are correct), `rhi_backend == "D3D11"`, `appearance.mode == "glass"`, `backdrop_serial >= 1`,
   `dpi_awareness == 2`, `control_exposed`, `overlay_shown`, `pages_ok`, every `resources_ok` true,
-  `fonts_ok`; screenshot: alpha == 0 at the four window corner pixels, alpha mean ≥ 250 inside the slab
+  `fonts_ok`, `ssl_ok`; screenshot: alpha == 0 at the four window corner pixels, alpha mean ≥ 250 inside the slab
   inset 40 px, RGB std ≥ 8 inside (a solid fallback or a dead shader path is flat), tab-bar row mean
-  |diff| vs the slab ≥ 6.
+  |diff| vs the slab ≥ 6. The last two depend on the desktop behind the window (the glass refracts
+  it): measured 6.9–16 over a static desktop and 4.1 with the chat client's page behind the default
+  window position (2026-09-10, identical values with the old and new spring constants) — a FAIL on
+  those two rows alone is a desktop-content artefact, rerun with a plain window behind the exe.
 - run B (temp config with `running_on_start=true`, `translation_backend="identity"`, AUTOEXIT 20000):
   `status_history` contains a message starting `"OCR: <engine> on"` (`mangaocr`, or `paddleocr` when the
   manga-ocr models are not downloaded yet — the bare smoke exe never has them) and none starting `"Engine error"`
   or `"Error:"` (exercises the rapidocr / py3langid data in the frozen tree, which only fail at engine
   construction).
+- run D (opt-in `--runs D`, ~200 MB download; temp config as B, `LOCALAPPDATA` pointed at an empty
+  folder inside the sandbox, `GLASSTRANSLATE_SMOKE_ACTIONS=downloadMangaOcr`, AUTOEXIT cap 600000):
+  `status_history` starts with the `"OCR: mangaocr failed (...); using paddleocr"` fallback,
+  `actions.downloadMangaOcr` finished with progress 100 and `models_ready_before/after` False/True
+  under the clean profile, a `"manga-ocr models installed at ..."` status, then `"OCR: mangaocr restored"`
+  (the fallback chain re-probes the primary every 5 s; a rebuild would say `"OCR: mangaocr on ..."`), no `"Download failed"`, no secret markers, log file under the clean profile.
 - run C (onefile lifecycle): start with AUTOEXIT 60000, wait for the report, `taskkill //F //PID`,
   launch run A again and assert the stale `_MEI*` dir is gone (sweep below).
 Spec rules (verified in `demo/output/probes/packaging/` and the review probes): keep PySide6
