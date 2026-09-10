@@ -100,8 +100,11 @@ QtObject {
     readonly property Spring springPress: Spring { spring: 5.0; damping: 0.32 }
     readonly property Spring springGrab: Spring { spring: 5.0; damping: 0.38 }
     readonly property Spring springSwell: Spring { spring: 3.6; damping: 0.30 }
-    readonly property Spring springLead: Spring { spring: 4.6; damping: 0.36 }
-    readonly property Spring springTrail: Spring { spring: 3.0; damping: 0.30 }
+    // Tab indicator (2026-09-10 F2 follow-up, docs/perf/2026-09-09-glass-baseline.md): 8.0/0.50 + 6.0/0.45
+    // settle in ~0.55 s with ~1 % overshoot; the original 4.6/0.36 + 3.0/0.30 kept the scene rendering
+    // ~0.95 s per switch at 3 % overshoot.  Stiffer still (10/0.6) loses the visible settle entirely.
+    readonly property Spring springLead: Spring { spring: 8.0; damping: 0.50 }
+    readonly property Spring springTrail: Spring { spring: 6.0; damping: 0.45 }
     readonly property int motionDuration: 120
     readonly property int fade: 160
     readonly property int pressInMs: 90

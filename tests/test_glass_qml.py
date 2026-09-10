@@ -301,3 +301,13 @@ def test_public_contract_and_close(window: C.ControlWindow) -> None:
     assert window.close() is True
     assert closed == [1]
     assert not window.bridge._save_timer.isActive()  # the pending save was flushed
+
+
+def test_theme_tab_springs_are_the_measured_2026_09_10_values(window: C.ControlWindow) -> None:
+    """F2 follow-up: the indicator springs settle in ~0.55 s (8.0/0.50 lead, 6.0/0.45 trail); the
+    original 4.6/0.36 + 3.0/0.30 kept the scene rendering ~0.95 s per switch (docs/perf baseline)."""
+    root = window.rootObject()
+    assert float(_qml_value(root, "Theme.springLead.spring")) == pytest.approx(8.0)
+    assert float(_qml_value(root, "Theme.springLead.damping")) == pytest.approx(0.50)
+    assert float(_qml_value(root, "Theme.springTrail.spring")) == pytest.approx(6.0)
+    assert float(_qml_value(root, "Theme.springTrail.damping")) == pytest.approx(0.45)
