@@ -94,6 +94,7 @@ _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_LAYERED = 0x00080000
 _WS_EX_NOACTIVATE = 0x08000000
+_WDA_NONE = 0x00000000
 _WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 _HANDLE_PX = 16  # logical size of the resize handle square in grab mode
@@ -273,6 +274,7 @@ class GlassOverlay(QWidget):
         self._uppercase = True
         self._click_through = True
         self._grab_mode = False
+        self._capture_excluded = True  # capture mode (F1) clears this; re-applied on every show
         self._drag: Optional[_Drag] = None
         self._native_ready = False
         self._measure: Measure = qt_measurer(self._font_family)
@@ -295,6 +297,11 @@ class GlassOverlay(QWidget):
     @property
     def click_through(self) -> bool:
         return self._click_through
+
+    @property
+    def capture_excluded(self) -> bool:
+        """``False`` while capture mode lets screen-capture tools see the glass."""
+        return self._capture_excluded
 
     @property
     def segments(self) -> List[TranslatedSegment]:
@@ -338,6 +345,16 @@ class GlassOverlay(QWidget):
             self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, self._click_through)
             if self.isVisible():
                 self.show()
+
+    def set_capture_excluded(self, excluded: bool) -> None:
+        """Hide the glass from screen capture (default) or make it capturable.
+
+        The desired state is remembered and re-applied on every ``showEvent``, so
+        hiding / showing the glass never resets capture mode.
+        """
+        self._capture_excluded = bool(excluded)
+        if sys.platform == "win32":
+            self._apply_capture_affinity()
 
     def set_grab_mode(self, enabled: bool) -> None:
         """Enter/leave grab mode: interactive move/resize with a visible frame."""
@@ -393,7 +410,7 @@ class GlassOverlay(QWidget):
         self._native_ready = True
         if sys.platform == "win32":
             self._apply_win32_styles()
-            self._exclude_from_capture()
+            self._apply_capture_affinity()
         else:  # pragma: no cover
             self.set_click_through(self._click_through)
         self._refresh_physical_rect()
@@ -721,13 +738,15 @@ class GlassOverlay(QWidget):
             ex &= ~(_WS_EX_TRANSPARENT | _WS_EX_NOACTIVATE)
         user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, ctypes.c_long(ctypes.c_int32(ex).value))
 
-    def _exclude_from_capture(self) -> None:
+    def _apply_capture_affinity(self) -> None:
+        """Push ``self._capture_excluded`` to the native window (no-op before it exists)."""
         user32 = _user32()
         if user32 is None or not self._native_ready:
             return
-        if not user32.SetWindowDisplayAffinity(_hwnd(self), _WDA_EXCLUDEFROMCAPTURE):
-            log.warning("SetWindowDisplayAffinity failed (error %d); glass may appear in captures",
-                        ctypes.get_last_error())
+        affinity = _WDA_EXCLUDEFROMCAPTURE if self._capture_excluded else _WDA_NONE
+        if not user32.SetWindowDisplayAffinity(_hwnd(self), affinity):
+            log.warning("SetWindowDisplayAffinity(0x%X) failed (error %d); glass capture state unknown",
+                        affinity, ctypes.get_last_error())
 
     def _qt_physical_rect(self) -> Rect:
         """Portable approximation used when ``GetWindowRect`` is unavailable:

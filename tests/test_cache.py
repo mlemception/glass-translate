@@ -95,6 +95,39 @@ def test_cache_thread_safety_smoke():
     assert cache.hits + cache.misses == 8 * 500
 
 
+def test_cache_context_defaults_to_empty_and_is_backwards_compatible():
+    cache = TranslationCache()
+    cache.put("hello", "en", "de", "hallo")
+    assert cache.get("hello", "en", "de") == "hallo"
+    assert cache.get("hello", "en", "de", "") == "hallo"
+    assert ("hello", "en", "de") in cache and ("hello", "en", "de", "") in cache
+
+
+def test_cache_same_text_different_context_is_a_miss():
+    cache = TranslationCache()
+    cache.put("先生", "ja", "en", "Teacher", context="ctx-a")
+    assert cache.get("先生", "ja", "en", "ctx-a") == "Teacher"
+    assert cache.get("先生", "ja", "en", "ctx-b") is None
+    assert cache.get("先生", "ja", "en") is None
+    cache.put("先生", "ja", "en", "Sensei", context="ctx-b")
+    assert cache.get("先生", "ja", "en", "ctx-a") == "Teacher"
+    assert cache.get("先生", "ja", "en", "ctx-b") == "Sensei"
+    assert len(cache) == 2
+
+
+def test_cache_v1_file_loads_as_empty_context(tmp_path: Path):
+    path = tmp_path / "v1.json"
+    path.write_text(
+        json.dumps({"version": 1, "max_size": 10, "entries": [{"text": "a", "src": "en", "tgt": "de", "translation": "b"}]}),
+        encoding="utf-8",
+    )
+    cache = TranslationCache()
+    assert cache.load(path) == 1
+    assert cache.get("a", "en", "de") == "b"
+    saved = json.loads(cache.save(tmp_path / "v2.json").read_text(encoding="utf-8"))
+    assert saved["version"] == 2 and saved["entries"][0]["context"] == ""
+
+
 def test_cache_persistence_roundtrip(tmp_path: Path):
     cache = TranslationCache(max_size=10)
     cache.put("hello", "en", "de", "hallo")
@@ -140,7 +173,7 @@ def test_identity_translator():
 
 # ---------------------------------------------------------------- factory
 def test_factory_backends(tmp_path: Path):
-    assert available_backends() == ["argos", "libretranslate", "identity"]
+    assert available_backends() == ["argos", "libretranslate", "gemini", "identity"]
     cfg = AppConfig(translation_backend="identity")
     assert isinstance(create_translator(cfg), IdentityTranslator)
     cfg = AppConfig(translation_backend="libretranslate", translation_api_url="http://x/", translation_api_key="k")

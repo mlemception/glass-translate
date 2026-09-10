@@ -36,6 +36,7 @@ from .. import __version__
 from ..config.settings import AppConfig, Hotkeys, OverlayGeometry, default_config_path, user_data_dir
 from ..core.pipeline import Pipeline
 from ..core.types import PipelineStats
+from .capture_mode import CaptureMode
 from .control import ControlWindow, is_frozen
 from .glass import win32
 from .hotkeys import HotkeyManager
@@ -92,6 +93,12 @@ class GlassTranslateApp(QObject):
         self.last_stats: Optional[PipelineStats] = None
         self._bound_hotkeys: Optional[Hotkeys] = None
         self._torn_down = False
+        self.capture_mode = CaptureMode(
+            self.overlay,
+            pipeline=lambda: self.pipeline,
+            wants_running=lambda: self.cfg.running_on_start,
+            status=self.control.show_status,
+        )
 
         geom = cfg.overlay
         self.overlay.setGeometry(QRect(geom.x, geom.y, geom.w, geom.h))
@@ -103,6 +110,7 @@ class GlassTranslateApp(QObject):
         self.control.start_stop_requested.connect(self._on_start_stop)
         self.control.grab_mode_requested.connect(self.overlay.toggle_grab_mode)
         self.control.toggle_glass_requested.connect(self.toggle_glass)
+        self.control.capture_mode_requested.connect(self.capture_mode.set_active)
         self.control.models_changed.connect(self._on_models_changed)
         self.overlay.geometry_changed.connect(self._on_overlay_geometry)
         self.overlay.grab_mode_changed.connect(self._on_grab_mode_changed)
@@ -119,6 +127,7 @@ class GlassTranslateApp(QObject):
     def shutdown(self) -> None:
         """Stop everything; safe to call more than once."""
         self.hotkeys.stop()
+        self.capture_mode.restore()
         if self.pipeline is not None:
             self.pipeline.stop()
             self.pipeline = None
@@ -165,6 +174,7 @@ class GlassTranslateApp(QObject):
             self.pipeline.resume()
         self.cfg.running_on_start = True
         self.control.set_running(True)
+        self.capture_mode.hold()  # a pipeline started during capture mode waits until it ends
 
     def stop_pipeline(self) -> None:
         if self.pipeline is not None:

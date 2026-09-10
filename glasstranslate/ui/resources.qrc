@@ -13,6 +13,7 @@
     <file alias="GlassSlider.qml">qml/GlassSlider.qml</file>
     <file alias="GlassStepper.qml">qml/GlassStepper.qml</file>
     <file alias="GlassSurface.qml">qml/GlassSurface.qml</file>
+    <file alias="GlassTextArea.qml">qml/GlassTextArea.qml</file>
     <file alias="GlassTextField.qml">qml/GlassTextField.qml</file>
     <file alias="GlassToggle.qml">qml/GlassToggle.qml</file>
     <file alias="Glyph.qml">qml/Glyph.qml</file>

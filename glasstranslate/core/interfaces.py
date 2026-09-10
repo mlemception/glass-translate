@@ -59,6 +59,18 @@ class Translator(ABC):
     def supports(self, src: str, tgt: str) -> bool:
         return (src, tgt) in set(self.supported_pairs())
 
+    def set_context(self, system_prompt: str) -> None:
+        """Per-session context (series name / prompt template) for backends that can use it.
+
+        Model backends ignore it; only prompt-driven providers such as Gemini override this.
+        """
+        return None
+
+    def context_key(self) -> str:
+        """Short stable digest of the active context, mixed into the translation cache key so
+        results never leak between contexts.  ``""`` when the backend has none."""
+        return ""
+
     def close(self) -> None:  # pragma: no cover - trivial
         pass
 

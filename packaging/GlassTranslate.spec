@@ -75,9 +75,16 @@ rapidocr_hidden = (
 ctranslate2_bins = collect_dynamic_libs("ctranslate2")  # ctranslate2.dll, libiomp5md.dll (cudnn stub pruned below)
 sentencepiece_datas = collect_data_files("sentencepiece", includes=["package_data/*"])
 py3langid_datas = collect_data_files("py3langid", includes=["data/*"])  # data/model.npz.xz
+# Gemini provider (feature batch 2026-09-09): plain `requests` over https needs certifi's CA bundle in the tree.
+certifi_datas = collect_data_files("certifi", includes=["cacert.pem"])
 # resources_rc is imported dynamically (importlib) in control.py, invisible to Analysis.
+# manga-ocr ONNX engine + fallback chain are imported lazily by ocr/factory.py; jaconv is pure Python.
 extra_hidden = ["mss.windows", "comtypes.gen", "dxcam.processor.numpy_processor",
-                "glasstranslate.ui.resources_rc"]
+                "glasstranslate.ui.resources_rc",
+                "glasstranslate.ocr.mangaocr", "glasstranslate.ocr.models", "glasstranslate.ocr.chain",
+                "glasstranslate.ocr.furigana", "glasstranslate.translate.gemini", "glasstranslate.translate.context",
+                "glasstranslate.config.secrets", "requests", "certifi", "jaconv"]
+# manga-ocr models are NEVER bundled: they are downloaded on first use into %LOCALAPPDATA%/GlassTranslate/models.
 # Bundle-root marker: run.py sweeps stale %TEMP%\_MEI* dirs that contain it (onefile lifecycle, section 6).
 marker_datas = [(os.path.join(PACKAGING, "gt_bundle.marker"), ".")]
 
@@ -85,7 +92,7 @@ a = Analysis(  # noqa: F821
     [ENTRY],
     pathex=[ROOT],
     binaries=ctranslate2_bins,
-    datas=rapidocr_datas + sentencepiece_datas + py3langid_datas + marker_datas,
+    datas=rapidocr_datas + sentencepiece_datas + py3langid_datas + certifi_datas + marker_datas,
     hiddenimports=SHIBOKEN_RUNTIME_STDLIB + rapidocr_hidden + extra_hidden,
     hookspath=[],
     runtime_hooks=[],

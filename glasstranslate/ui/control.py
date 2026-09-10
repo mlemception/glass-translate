@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import (
     Property,
@@ -38,7 +38,6 @@ from PySide6.QtCore import (
     QPointF,
     QSize,
     QSizeF,
-    QThread,
     QTimer,
     QUrl,
     Qt,
@@ -58,14 +57,34 @@ from PySide6.QtGui import (
     QShowEvent,
     QWindow,
 )
-from PySide6.QtQuick import QQuickView
+from PySide6.QtQuick import QQuickItem, QQuickView
 
 from ..config.settings import AppConfig, project_root, user_data_dir
 from ..core.types import PipelineStats
-from .glass import win32
+from .glass import profile, win32
 from .glass.appearance import Appearance
 from .glass.backdrop import BackdropFrame, BackdropGrabber, BackdropProvider, InkPolarity, LumaSmoother, WindowGeometry
 from .hotkeys import normalize_hotkey
+from .bridge_fields import (  # noqa: F401 - re-exported for tests and app.py
+    _CONFIG_FIELDS,
+    _ONLINE_BACKENDS,
+    _OCR_DEVICES,
+    _TRANSLATE_DEVICES,
+    _TRANSLATE_DEVICES_FROZEN,
+    CUDA_FROZEN_HINT,
+    LANGUAGES,
+    _cfg_get,
+    _cfg_set,
+    _config_property,
+    _items,
+    download_label,
+    download_progress,
+    format_stats,
+    is_frozen,
+    translate_device_items,
+)
+from .download_workers import MangaOcrDownloadWorker, ModelDownloadWorker  # noqa: F401 - re-exported
+from .stats_model import StatsModel
 
 __all__ = [
     "CUDA_FROZEN_HINT",
@@ -85,35 +104,7 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-# ISO-639-1 code -> display name, in menu order.
-LANGUAGES: List[Tuple[str, str]] = [
-    ("en", "English"),
-    ("de", "German"),
-    ("es", "Spanish"),
-    ("fr", "French"),
-    ("it", "Italian"),
-    ("pt", "Portuguese"),
-    ("nl", "Dutch"),
-    ("pl", "Polish"),
-    ("ru", "Russian"),
-    ("uk", "Ukrainian"),
-    ("ja", "Japanese"),
-    ("zh", "Chinese"),
-    ("ko", "Korean"),
-    ("ar", "Arabic"),
-    ("tr", "Turkish"),
-    ("hi", "Hindi"),
-    ("vi", "Vietnamese"),
-    ("th", "Thai"),
-]
-
 _SAVE_DEBOUNCE_MS = 300
-_OCR_DEVICES = ("auto", "gpu", "cpu")
-_TRANSLATE_DEVICES = ("auto", "cuda", "cpu")
-_TRANSLATE_DEVICES_FROZEN = ("auto", "cpu")
-_ONLINE_BACKENDS = {"libretranslate"}
-CUDA_FROZEN_HINT = "CUDA is not available in the packaged build; translation runs on CPU"
-
 WINDOW_TITLE = "GlassTranslate"
 MAIN_QML_URL = "qrc:/qml/Main.qml"
 WINDOW_DEFAULT_SIZE = QSize(832, 640)  # slab 760x560 inside the 36/28/36/52 shadow margin; fixed-size, not resizable
@@ -136,11 +127,6 @@ _HOTKEY_FIELDS: Dict[str, str] = {
     "toggle_hidden": "toggle_hidden",
 }
 _HOTKEY_PROPS: Dict[str, str] = {"toggle_grab": "hotkeyGrab", "toggle_running": "hotkeyRunning", "toggle_hidden": "hotkeyHidden"}
-
-
-def is_frozen() -> bool:
-    """True inside the PyInstaller exe."""
-    return bool(getattr(sys, "frozen", False))
 
 
 # ------------------------------------------------------------------------------- resources
@@ -199,213 +185,6 @@ def _ensure_resources() -> bool:
 RESOURCES_OK = _ensure_resources()
 
 
-# ------------------------------------------------------------------------------ pure helpers
-def format_stats(stats: PipelineStats) -> Dict[str, str]:
-    """The six readout strings, formatted exactly as the old ``update_stats`` did."""
-    skipped = " (unchanged)" if stats.skipped_unchanged else ""
-    blocks = stats.extra.get("blocks")
-    blocks_txt = f", {blocks} blocks" if isinstance(blocks, int) else ""
-    rate = stats.extra.get("cache_hit_rate")
-    rate_txt = f"{rate * 100:.0f}%" if isinstance(rate, (int, float)) else "-"
-    return {
-        "total": f"{stats.total_ms:.1f} ms",
-        "fps": f"{stats.fps:.1f}",
-        "stages": (
-            f"capture {stats.capture_ms:.1f} | diff {stats.diff_ms:.1f} | ocr {stats.ocr_ms:.1f} | "
-            f"style {stats.style_ms:.1f} | translate {stats.translate_ms:.1f}"
-        ),
-        "segments": f"{stats.segments} live{blocks_txt}, {stats.dirty_regions} dirty{skipped}",
-        "cache": f"{stats.cache_hits} hit / {stats.cache_misses} miss, {rate_txt} overall",
-        "devices": (
-            f"ocr: {stats.extra.get('ocr', '?')}@{stats.ocr_device or '?'}   "
-            f"translate: {stats.extra.get('translator', '?')}@{stats.translate_device or '?'}   "
-            f"capture: {stats.extra.get('capture', '?')}   src: {stats.extra.get('src_lang', '-')}"
-        ),
-    }
-
-
-def download_label(sugoi: bool, src: str, tgt: str) -> str:
-    """``"Sugoi v4 ja → en"`` or ``"<src> → <tgt>"``."""
-    return "Sugoi v4 ja → en" if sugoi else f"{src} → {tgt}"
-
-
-def download_progress(label: str, done: int, total: int) -> Tuple[str, int]:
-    """Progress row text and percentage (-1 = indeterminate) for a download callback."""
-    if total > 0:
-        return f"Downloading {label}: {done / 1e6:.1f} / {total / 1e6:.1f} MB", int(done * 100 // total)
-    return f"Downloading {label}: {done / 1e6:.1f} MB", -1
-
-
-def _items(pairs: Sequence[Tuple[str, str]], current: str) -> List[Dict[str, str]]:
-    """``{value, text}`` entries; an unknown ``current`` is appended (the old ``_select_data`` rule)."""
-    items = [{"value": value, "text": text} for value, text in pairs]
-    if current not in {value for value, _ in pairs}:
-        items.append({"value": current, "text": current})
-    return items
-
-
-def translate_device_items(current: str, frozen: Optional[bool] = None) -> List[Dict[str, str]]:
-    """``auto, cuda, cpu`` in a source checkout; ``auto, cpu`` when frozen (the exe prunes the CUDA
-    libraries).  A stored ``cuda`` is still appended by the unknown-value rule, carrying a ``hint``."""
-    frozen = is_frozen() if frozen is None else frozen
-    base = _TRANSLATE_DEVICES_FROZEN if frozen else _TRANSLATE_DEVICES
-    items = _items([(d, d) for d in base], current)
-    if frozen and current == "cuda":
-        items[-1]["hint"] = CUDA_FROZEN_HINT
-    return items
-
-
-# ------------------------------------------------------------------------- download worker
-class ModelDownloadWorker(QThread):
-    """Downloads one Argos package in the background.
-
-    Emits :attr:`progress` (done, total_or_-1) while downloading, then either
-    :attr:`finished_ok` with the extracted directory or :attr:`failed`.
-    """
-
-    progress = Signal(int, int)
-    finished_ok = Signal(str)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        models_dir: str,
-        from_code: str,
-        to_code: str,
-        parent: Optional[QObject] = None,
-        *,
-        sugoi: bool = False,
-    ) -> None:
-        super().__init__(parent)
-        self._models_dir = models_dir
-        self._from = from_code
-        self._to = to_code
-        self._sugoi = sugoi  # install the Sugoi v4 ja->en model instead of an Argos package
-
-    def run(self) -> None:  # noqa: D401 - QThread API
-        try:
-            from ..translate.argos import ArgosCT2Translator
-
-            translator = ArgosCT2Translator(self._models_dir, device="cpu")
-
-            def cb(done: int, total: Optional[int]) -> None:
-                self.progress.emit(int(done), int(total) if total else -1)
-
-            if self._sugoi:
-                path = translator.download_sugoi(progress_cb=cb)
-            else:
-                path = translator.download_package(self._from, self._to, progress_cb=cb)
-            self.finished_ok.emit(str(path))
-        except Exception as exc:
-            log.exception("model download failed")
-            self.failed.emit(str(exc))
-
-
-# ------------------------------------------------------------------------------ stats model
-class StatsModel(QObject):
-    """Live latency readout for the status strip (``bridge.stats``).
-
-    ``totalText`` / ``fpsText`` feed the strip, the four detail lines the drawer; every value is
-    ``"-"`` until the first pipeline pass.
-    """
-
-    changed = Signal()
-
-    _KEYS = ("total", "fps", "stages", "segments", "cache", "devices")
-
-    def __init__(self, parent: Optional[QObject] = None) -> None:
-        super().__init__(parent)
-        self._values: Dict[str, str] = {k: "-" for k in self._KEYS}
-
-    def update(self, stats: PipelineStats) -> None:
-        """Refresh every line from a pipeline pass."""
-        self._values = format_stats(stats)
-        self.changed.emit()
-
-    def reset(self) -> None:
-        self._values = {k: "-" for k in self._KEYS}
-        self.changed.emit()
-
-    def _text(self, key: str) -> str:
-        return self._values[key]
-
-    totalText = Property(str, lambda self: self._text("total"), notify=changed)
-    fpsText = Property(str, lambda self: self._text("fps"), notify=changed)
-    stagesText = Property(str, lambda self: self._text("stages"), notify=changed)
-    segmentsText = Property(str, lambda self: self._text("segments"), notify=changed)
-    cacheText = Property(str, lambda self: self._text("cache"), notify=changed)
-    devicesText = Property(str, lambda self: self._text("devices"), notify=changed)
-
-
-# ------------------------------------------------------------------------- config plumbing
-def _clamp(lo: float, hi: float) -> Callable[[Any], float]:
-    return lambda v: min(hi, max(lo, float(v)))
-
-
-def _strip(v: Any) -> str:
-    return str(v).strip()
-
-
-@dataclass(frozen=True)
-class _Field:
-    """One config property: the ``AppConfig`` attribute (dotted for ``hotkeys.x``) and its coercion."""
-
-    attr: str
-    coerce: Callable[[Any], Any]
-
-
-_CONFIG_FIELDS: Dict[str, _Field] = {
-    "sourceLang": _Field("source_lang", str),
-    "targetLang": _Field("target_lang", str),
-    "ocrEngine": _Field("ocr_engine", str),
-    "ocrDevice": _Field("ocr_device", str),
-    "translationBackend": _Field("translation_backend", str),
-    "translateDevice": _Field("translate_device", str),
-    "apiUrl": _Field("translation_api_url", _strip),
-    "apiKey": _Field("translation_api_key", _strip),
-    "modelsDir": _Field("models_dir", _strip),
-    "overlayOpacity": _Field("overlay_opacity", _clamp(0.0, 1.0)),
-    "fontFamily": _Field("font_family", str),
-    "hideOriginal": _Field("hide_original", bool),
-    "mangaMode": _Field("manga_mode", bool),
-    "uppercase": _Field("uppercase", bool),
-    "refreshHz": _Field("refresh_hz", _clamp(0.5, 60.0)),
-    "debounceMs": _Field("debounce_ms", lambda v: int(min(2000, max(0, round(float(v)))))),
-    "minConfidence": _Field("min_confidence", _clamp(0.0, 1.0)),
-    "hotkeyGrab": _Field("hotkeys.toggle_grab", str),
-    "hotkeyRunning": _Field("hotkeys.toggle_running", str),
-    "hotkeyHidden": _Field("hotkeys.toggle_hidden", str),
-}
-
-
-def _cfg_get(cfg: AppConfig, attr: str) -> Any:
-    obj: Any = cfg
-    for part in attr.split("."):
-        obj = getattr(obj, part)
-    return obj
-
-
-def _cfg_set(cfg: AppConfig, attr: str, value: Any) -> None:
-    parts = attr.split(".")
-    obj: Any = cfg
-    for part in parts[:-1]:
-        obj = getattr(obj, part)
-    setattr(obj, parts[-1], value)
-
-
-def _config_property(name: str, qtype: type, notify: Signal) -> Property:
-    """A read/write QML property backed by ``AppConfig`` through :meth:`ControlBridge._set_config`."""
-    attr = _CONFIG_FIELDS[name].attr
-
-    def fget(self: "ControlBridge") -> Any:
-        return _cfg_get(self._cfg, attr)
-
-    def fset(self: "ControlBridge", value: Any) -> None:
-        self._set_config(name, value)
-
-    return Property(qtype, fget, fset, notify=notify)
-
-
 # ------------------------------------------------------------------------------------ bridge
 class ControlBridge(QObject):
     """Everything ``Main.qml`` reads and calls (context property ``bridge``).
@@ -423,6 +202,7 @@ class ControlBridge(QObject):
     start_stop_requested = Signal(bool)  # True = start
     grab_mode_requested = Signal()
     toggle_glass_requested = Signal()
+    capture_mode_requested = Signal(bool)  # overlay capture mode on/off (runtime only, F1)
     models_changed = Signal()  # a package was downloaded
 
     # -- QML notifies
@@ -446,13 +226,23 @@ class ControlBridge(QObject):
     hotkeyGrabChanged = Signal()
     hotkeyRunningChanged = Signal()
     hotkeyHiddenChanged = Signal()
+    geminiModelChanged = Signal()
+    geminiApiFormatChanged = Signal()
+    geminiBaseUrlChanged = Signal()
+    geminiTimeoutSChanged = Signal()
+    geminiMaxRetriesChanged = Signal()
+    geminiApiKeyChanged = Signal()  # set/not-set only; the key itself never crosses the bridge
+    seriesNameChanged = Signal()
+    seriesPromptTemplateChanged = Signal()
     listsChanged = Signal()
     backendFlagsChanged = Signal()
     loadingChanged = Signal()
     runningChanged = Signal()
+    overlayCaptureModeChanged = Signal()
     statusMessageChanged = Signal()
     downloadChanged = Signal()
     backdropChanged = Signal()
+    backdropShiftChanged = Signal()
     inkPolarityChanged = Signal()
 
     def __init__(
@@ -474,6 +264,7 @@ class ControlBridge(QObject):
         self._appearance = appearance
         self._loading = False
         self._running = False
+        self._capture_mode = False  # runtime only: never read from / written to AppConfig
         self._status = "Ready"
         self.status_history: List[str] = []
         self._stats = StatsModel(self)
@@ -490,6 +281,12 @@ class ControlBridge(QObject):
         self._backdrop_serial = 0
         self._backdrop_origin = QPointF(0.0, 0.0)
         self._backdrop_size = QSizeF(0.0, 0.0)
+        # F2-1: physical origin of the window the current frame was grabbed for, and of the
+        # window now (None until the first moveEvent).  Their difference is backdropShift.
+        self._frame_window_origin: Tuple[int, int] = (0, 0)
+        self._window_origin: Optional[Tuple[int, int]] = None
+        self._backdrop_dpr = 1.0
+        self._backdrop_shift = QPointF(0.0, 0.0)
         self._luma = LumaSmoother()
         self._polarity = InkPolarity(self._dark_mode())
         # persistence
@@ -563,11 +360,31 @@ class ControlBridge(QObject):
         self._backdrop_serial += 1
         self._backdrop_origin = QPointF(ox, oy)
         dpr = frame.dpr if frame.dpr > 0 else 1.0
+        self._backdrop_dpr = dpr
         self._backdrop_size = QSizeF(frame.image.width() / dpr, frame.image.height() / dpr)
+        self._frame_window_origin = (frame.window_rect.x, frame.window_rect.y)
         self._luma.update(frame.luma, frame.timestamp)
         self.backdropChanged.emit()
+        self._update_backdrop_shift()
         if self._glass_mode() and self._polarity.update(self._backdrop_luma()):
             self.inkPolarityChanged.emit()
+
+    def set_window_origin(self, x: int, y: int) -> None:
+        """GUI-thread entry from ``moveEvent``: physical top-left of the window right now."""
+        self._window_origin = (int(x), int(y))
+        self._update_backdrop_shift()
+
+    def _update_backdrop_shift(self) -> None:
+        """Logical offset that keeps a frame grabbed for an older window rect desktop-aligned."""
+        if self._window_origin is None or self._backdrop_serial == 0:
+            shift = QPointF(0.0, 0.0)
+        else:
+            fx, fy = self._frame_window_origin
+            wx, wy = self._window_origin
+            shift = QPointF((fx - wx) / self._backdrop_dpr, (fy - wy) / self._backdrop_dpr)
+        if shift != self._backdrop_shift:
+            self._backdrop_shift = shift
+            self.backdropShiftChanged.emit()
 
     @Slot()
     def appearance_changed(self) -> None:
@@ -659,6 +476,62 @@ class ControlBridge(QObject):
     hotkeyGrab = _config_property("hotkeyGrab", str, hotkeyGrabChanged)
     hotkeyRunning = _config_property("hotkeyRunning", str, hotkeyRunningChanged)
     hotkeyHidden = _config_property("hotkeyHidden", str, hotkeyHiddenChanged)
+    geminiModel = _config_property("geminiModel", str, geminiModelChanged)
+    geminiApiFormat = _config_property("geminiApiFormat", str, geminiApiFormatChanged)
+    geminiBaseUrl = _config_property("geminiBaseUrl", str, geminiBaseUrlChanged)
+    geminiTimeoutS = _config_property("geminiTimeoutS", float, geminiTimeoutSChanged)
+    geminiMaxRetries = _config_property("geminiMaxRetries", int, geminiMaxRetriesChanged)
+    seriesName = _config_property("seriesName", str, seriesNameChanged)
+    seriesPromptTemplate = _config_property("seriesPromptTemplate", str, seriesPromptTemplateChanged)
+
+    # ------------------------------------------------------------ Gemini API key (secret store)
+    def _gemini_api_key_set(self) -> bool:
+        from ..config.secrets import has_gemini_api_key
+
+        return has_gemini_api_key()
+
+    def _gemini_api_key_hint(self) -> str:
+        from ..config.secrets import GEMINI_API_KEY_ENV, get_gemini_api_key, redact
+
+        if os.environ.get(GEMINI_API_KEY_ENV, "").strip():
+            return f"Using the {GEMINI_API_KEY_ENV} environment variable"
+        key = get_gemini_api_key()
+        return f"Key stored ({redact(key)})" if key else "No key stored"
+
+    geminiApiKeySet = Property(bool, _gemini_api_key_set, notify=geminiApiKeyChanged)
+    geminiApiKeyHint = Property(str, _gemini_api_key_hint, notify=geminiApiKeyChanged)
+
+    @Slot(str, result=bool)
+    def setGeminiApiKey(self, text: str) -> bool:
+        """Store (or, with empty text, clear) the Gemini API key in the user secret store.
+
+        The key never enters ``AppConfig``: it is written to ``secrets.json`` under the user data
+        directory and only ``geminiApiKeySet`` / a redacted hint are readable from QML.
+        """
+        from ..config.secrets import set_gemini_api_key
+
+        try:
+            set_gemini_api_key(str(text))
+        except OSError as exc:
+            log.warning("storing the Gemini API key failed: %s", exc.__class__.__name__)
+            self.show_status("Could not store the Gemini API key (see log)")
+            return False
+        self.geminiApiKeyChanged.emit()
+        self.show_status("Gemini API key stored" if str(text).strip() else "Gemini API key cleared")
+        # The key lives outside AppConfig, so a config diff can never notice it changed: ask the
+        # pipeline to rebuild the translator explicitly (app.py wires this to refresh_models()).
+        self.models_changed.emit()
+        return True
+
+    @Slot(result=str)
+    def defaultPromptTemplate(self) -> str:
+        from ..translate.context import DEFAULT_TEMPLATE
+
+        return DEFAULT_TEMPLATE
+
+    @Slot()
+    def resetPromptTemplate(self) -> None:
+        self._set_config("seriesPromptTemplate", "")
 
     # ------------------------------------------------------------------------ lists
     def _languages_source(self) -> List[Dict[str, str]]:
@@ -669,7 +542,9 @@ class ControlBridge(QObject):
         return _items([(code, f"{name} ({code})") for code, name in LANGUAGES], self._cfg.target_lang)
 
     def _ocr_engines(self) -> List[Dict[str, str]]:
-        return _items([(n, n) for n in self._engines], self._cfg.ocr_engine)
+        from ..ocr.factory import engine_label
+
+        return _items([(n, engine_label(n)) for n in self._engines], self._cfg.ocr_engine)
 
     def _ocr_devices(self) -> List[Dict[str, str]]:
         return _items([(d, d) for d in _OCR_DEVICES], self._cfg.ocr_device)
@@ -701,17 +576,48 @@ class ControlBridge(QObject):
     def _backend_argos(self) -> bool:
         return self._cfg.translation_backend == "argos"
 
+    def _backend_gemini(self) -> bool:
+        return self._cfg.translation_backend == "gemini"
+
+    def _backend_libre(self) -> bool:
+        return self._cfg.translation_backend == "libretranslate"
+
+    def _gemini_models(self) -> List[Dict[str, str]]:
+        from ..translate.gemini import MODEL_PRESETS
+
+        return _items([(m, m) for m in MODEL_PRESETS], self._cfg.gemini_model)
+
+    def _gemini_api_formats(self) -> List[Dict[str, str]]:
+        return _items([("native", "Gemini native (x-goog-api-key)"), ("openai", "OpenAI-compatible (Bearer)")],
+                      self._cfg.gemini_api_format)
+
+    geminiModels = Property("QVariantList", _gemini_models, notify=listsChanged)
+    geminiApiFormats = Property("QVariantList", _gemini_api_formats, notify=listsChanged)
+
     def _translate_device_hint(self) -> str:
         return CUDA_FROZEN_HINT if is_frozen() and self._cfg.translate_device == "cuda" else ""
 
     backendOnline = Property(bool, _backend_online, notify=backendFlagsChanged)
     backendArgos = Property(bool, _backend_argos, notify=backendFlagsChanged)
+    backendGemini = Property(bool, _backend_gemini, notify=backendFlagsChanged)
+    backendLibre = Property(bool, _backend_libre, notify=backendFlagsChanged)
     translateDeviceHint = Property(str, _translate_device_hint, notify=translateDeviceChanged)
     frozen = Property(bool, lambda self: is_frozen(), constant=True)
     loading = Property(bool, lambda self: self._loading, notify=loadingChanged)
 
     # ------------------------------------------------------------------------ state
+    def _set_capture_mode(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._capture_mode:
+            return
+        self._capture_mode = on
+        self.overlayCaptureModeChanged.emit()
+        self.capture_mode_requested.emit(on)
+
     running = Property(bool, lambda self: self._running, notify=runningChanged)
+    overlayCaptureMode = Property(
+        bool, lambda self: self._capture_mode, _set_capture_mode, notify=overlayCaptureModeChanged
+    )
     statusMessage = Property(str, lambda self: self._status, notify=statusMessageChanged)
     stats = Property(QObject, lambda self: self._stats, constant=True)
     windowTitle = Property(str, lambda self: WINDOW_TITLE, constant=True)
@@ -726,6 +632,9 @@ class ControlBridge(QObject):
 
     backdropSerial = Property(int, lambda self: self._backdrop_serial, notify=backdropChanged)
     backdropOrigin = Property(QPointF, lambda self: QPointF(self._backdrop_origin), notify=backdropChanged)
+    # F2-1: (frame window origin - current window origin) / dpr.  Main.qml adds it to backdropOrigin
+    # so a frame grabbed before the last move is drawn where that desktop content still is.
+    backdropShift = Property(QPointF, lambda self: QPointF(self._backdrop_shift), notify=backdropShiftChanged)
     # Logical size of the current backdrop image.  Qt Quick ignores QImage.devicePixelRatio for
     # image-provider images (Image.implicitWidth reports the *physical* width), so Main.qml sizes
     # the backdrop layer from this instead - otherwise the texture is magnified by the DPR at 150 %.
@@ -784,6 +693,38 @@ class ControlBridge(QObject):
         worker.failed.connect(self._on_download_failed)
         worker.start()
         self.downloadChanged.emit()
+
+    @Slot()
+    def downloadMangaOcr(self) -> None:
+        """Fetch the manga-ocr ONNX bundle into the models dir (F3); shares the progress row."""
+        if self._download_active():
+            self.show_status("A download is already running.")
+            return
+        worker = MangaOcrDownloadWorker(self._cfg.models_dir.strip() or self._cfg.models_dir, self)
+        self._download_worker = worker
+        self._download_base_label = "manga-ocr models"
+        self._download_label = "Downloading manga-ocr models…"
+        self._download_progress = -1
+        self._download_visible = True
+        worker.progress.connect(self._on_download_progress)
+        worker.finished_ok.connect(self._on_manga_ocr_ok)
+        worker.failed.connect(self._on_download_failed)
+        worker.start()
+        self.downloadChanged.emit()
+
+    def _manga_ocr_models_ready(self) -> bool:
+        from ..ocr.models import models_ready
+
+        return models_ready(self._cfg.models_dir)
+
+    mangaOcrModelsReady = Property(bool, _manga_ocr_models_ready, notify=downloadChanged)
+
+    @Slot(str)
+    def _on_manga_ocr_ok(self, path: str) -> None:
+        self._download_visible = False
+        self.downloadChanged.emit()
+        self.show_status(f"manga-ocr models installed at {path}")
+        self.models_changed.emit()
 
     @Slot()
     def hideDownload(self) -> None:
@@ -888,6 +829,7 @@ class ControlWindow(QQuickView):
     start_stop_requested = Signal(bool)  # True = start
     grab_mode_requested = Signal()
     toggle_glass_requested = Signal()
+    capture_mode_requested = Signal(bool)  # overlay capture mode on/off
     models_changed = Signal()  # a package was downloaded
     closed = Signal()  # the user closed the window
     _frame_ready = Signal(object)  # BackdropFrame, emitted from the grabber thread (queued)
@@ -912,7 +854,7 @@ class ControlWindow(QQuickView):
         self.appearance = Appearance(self)
         self.bridge = ControlBridge(cfg, config_path, window=self, appearance=self.appearance, parent=self)
         for name in ("config_changed", "start_stop_requested", "grab_mode_requested", "toggle_glass_requested",
-                     "models_changed"):
+                     "capture_mode_requested", "models_changed"):
             getattr(self.bridge, name).connect(getattr(self, name))
 
         self._provider = BackdropProvider()
@@ -937,6 +879,22 @@ class ControlWindow(QQuickView):
                 log.error("QML: %s", err.toString())
         elif self.rootObject() is None:
             log.error("QML root object missing (status %s)", self.status())
+        if profile.profiler.enabled:
+            self._install_profile_hooks()
+
+    def _install_profile_hooks(self) -> None:
+        """``GLASSTRANSLATE_PROFILE`` only: count swaps and tab switches (F2-0, never on by default)."""
+        prof = profile.profiler
+        # frameSwapped is emitted on the render thread.  A direct Python slot there needs the GIL
+        # while the GUI thread may hold it inside C++ (exposeEvent -> render-loop sync waiting for
+        # that same render thread) -> deadlock on the first frame.  Queue it: counts stay exact,
+        # the timestamp becomes GUI-dispatch time (documented in profile.py).
+        self._profile_hooks: List[Any] = [
+            self.frameSwapped.connect(lambda: prof.mark("swap"), Qt.ConnectionType.QueuedConnection)
+        ]
+        tab = self.rootObject().findChild(QQuickItem, "tabBar") if self.rootObject() is not None else None
+        if tab is not None:
+            self._profile_hooks.append(tab.currentIndexChanged.connect(lambda: prof.mark("tab", index=tab.property("currentIndex"))))
 
     # ---------------------------------------------------------------- public
     @property
@@ -1000,6 +958,10 @@ class ControlWindow(QQuickView):
     def moveEvent(self, event: QMoveEvent) -> None:
         super().moveEvent(event)
         self._refresh_geometry()
+        rect = self._geometry.get()[0]
+        profile.profiler.geometry("move", rect)
+        if rect is not None:
+            self.bridge.set_window_origin(rect.x, rect.y)
         self._poke()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -1065,14 +1027,16 @@ class ControlWindow(QQuickView):
 
     def _poke(self) -> None:
         if self._grabber is not None and not self._grabber.paused:
+            profile.profiler.mark("poke")
             self._grabber.poke()
 
     @Slot(object)
     def _on_backdrop_frame(self, frame: object) -> None:
         if not isinstance(frame, BackdropFrame):
             return
+        profile.profiler.frame_gui(frame, lambda: win32.physical_rect(self))
         self._provider.set_image(frame.image)
-        self.bridge.push_backdrop(frame)
+        profile.profiler.timed_call("push_backdrop_ms", self.bridge.push_backdrop, frame)
 
     @Slot(Qt.WindowState)
     def _on_window_state_changed(self, _state: Qt.WindowState) -> None:

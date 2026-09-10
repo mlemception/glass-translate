@@ -8,6 +8,8 @@ and ``demo/output/probes/review/qtquick`` (see the reports next to them):
   see *through* the window, which is what the backdrop grabber and the
   pipeline's capture need.  It is a per-HWND flag that survives hide/show,
   ``setGeometry`` and flag changes; re-applying it is harmless.
+  :func:`set_capture_excluded` is the reversible form (``WDA_NONE`` clears it)
+  used by the overlay's capture mode.
 * :func:`physical_rect` - the window rectangle in **physical** virtual-screen
   pixels from ``GetWindowRect`` (what mss expects), with a DPR-scaled
   ``frameGeometry()`` fallback that agrees exactly at DPR 1.0 and 2.0.
@@ -32,18 +34,21 @@ __all__ = [
     "SC_MOVE",
     "SC_SIZE",
     "WDA_EXCLUDEFROMCAPTURE",
+    "WDA_NONE",
     "WM_SYSCOMMAND",
     "dpi_awareness",
     "exclude_from_capture",
     "hwnd_of",
     "keyboard_move",
     "physical_rect",
+    "set_capture_excluded",
 ]
 
 log = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
 
+WDA_NONE = 0x0
 WDA_EXCLUDEFROMCAPTURE = 0x11
 WM_SYSCOMMAND = 0x0112
 SC_SIZE = 0xF000
@@ -75,19 +80,28 @@ def hwnd_of(window: QWindow) -> int:
     return int(window.winId())
 
 
-def exclude_from_capture(window: QWindow) -> bool:
-    """Hide ``window`` from screen capture so grabs show what is *behind* it.
+def set_capture_excluded(window: QWindow, excluded: bool) -> bool:
+    """Hide ``window`` from screen capture (``True``) or make it capturable again (``False``).
 
-    Returns True on success.  Safe to call before ``show()`` (``winId()``
-    creates the native window) and cheap to repeat on every ``showEvent``.
+    Returns True on success, False off Windows or when the Win32 call fails.  Safe to call
+    before ``show()`` (``winId()`` creates the native window) and cheap to repeat.
     """
     if not IS_WINDOWS:
         return False
     hwnd = wt.HWND(hwnd_of(window))
-    ok = bool(_user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+    affinity = WDA_EXCLUDEFROMCAPTURE if excluded else WDA_NONE
+    ok = bool(_user32.SetWindowDisplayAffinity(hwnd, affinity))
     if not ok:
-        log.warning("SetWindowDisplayAffinity failed: error %d", ctypes.get_last_error())
+        log.warning("SetWindowDisplayAffinity(0x%X) failed: error %d", affinity, ctypes.get_last_error())
     return ok
+
+
+def exclude_from_capture(window: QWindow) -> bool:
+    """Hide ``window`` from screen capture so grabs show what is *behind* it.
+
+    Returns True on success.  Equivalent to ``set_capture_excluded(window, True)``.
+    """
+    return set_capture_excluded(window, True)
 
 
 def _qt_physical_rect(window: QWindow) -> Rect:

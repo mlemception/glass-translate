@@ -40,7 +40,9 @@ class RapidOCREngine(OCREngine):
             the cost of one extra model pass per segment).
     """
 
-    name = "rapidocr"
+    # Config name: this is the "PaddleOCR (PP-OCRv5 via ONNX)" engine of the
+    # registry (``ocr/factory.py``); "rapidocr" is only an accepted alias.
+    name = "paddleocr"
 
     def __init__(self, device: str = "auto", min_confidence: float = 0.5, use_cls: bool = True) -> None:
         if device not in ("auto", "gpu", "cpu"):

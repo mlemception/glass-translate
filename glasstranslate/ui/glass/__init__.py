@@ -14,7 +14,7 @@ See ``docs/GLASS_DESIGN.md`` sections 1.2 and 1.3.
 """
 from .appearance import Appearance, AppearanceSignals, AppearanceWatcher, read_signals
 from .backdrop import BackdropFrame, BackdropGrabber, BackdropProvider, InkPolarity, LumaSmoother, WindowGeometry
-from .win32 import exclude_from_capture, keyboard_move, physical_rect
+from .win32 import exclude_from_capture, keyboard_move, physical_rect, set_capture_excluded
 
 __all__ = [
     "Appearance",
@@ -30,4 +30,5 @@ __all__ = [
     "keyboard_move",
     "physical_rect",
     "read_signals",
+    "set_capture_excluded",
 ]

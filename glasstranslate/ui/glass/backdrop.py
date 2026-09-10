@@ -36,6 +36,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtQuick import QQuickImageProvider
 
 from ...core.types import Rect
+from . import profile
 
 __all__ = [
     "GRAB_HZ",
@@ -300,6 +301,11 @@ class BackdropGrabber(threading.Thread):
             return
         shot = sct.grab({"left": region.x, "top": region.y, "width": region.w, "height": region.h})
         self.grab_count += 1
+        emitted = self._emit_if_changed(shot, region, rect, dpr, now)
+        profile.profiler.mark("grab", x=rect.x, y=rect.y, emitted=emitted, ms=(time.perf_counter() - now) * 1000.0)
+
+    def _emit_if_changed(self, shot, region: Rect, rect: Rect, dpr: float, now: float) -> bool:
+        """Change test + QImage build + emit; True when a frame was handed to ``on_frame``."""
         w, h = int(shot.width), int(shot.height)
         data = shot.bgra  # one copy out of mss, shared by the change test and the QImage
         bgra = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 4)
@@ -307,7 +313,7 @@ class BackdropGrabber(threading.Thread):
         force, self._force = self._force, False
         if not force and self._last_sample is not None and self._last_sample.shape == sample.shape \
                 and np.array_equal(sample, self._last_sample):
-            return
+            return False
         self._last_sample = sample
         slab = slab_rect(rect, dpr)
         luma = mean_luma(sample, Rect(slab.x - region.x, slab.y - region.y, slab.w, slab.h))
@@ -316,6 +322,7 @@ class BackdropGrabber(threading.Thread):
         image.setDevicePixelRatio(dpr)
         self.emit_count += 1
         self._on_frame(BackdropFrame(image, (region.x, region.y), rect, dpr, luma, now))
+        return True
 
 
 class BackdropProvider(QQuickImageProvider):

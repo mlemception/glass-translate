@@ -72,13 +72,26 @@ class AppConfig:
     source_lang: str = "auto"  # "auto" or ISO-639-1
     target_lang: str = "en"
     # engines
-    ocr_engine: str = "rapidocr"
+    # "mangaocr" (manga-ocr ONNX recogniser, falls back to PaddleOCR when its
+    # models are missing) or "paddleocr" (rapidocr running PP-OCRv5 via ONNX;
+    # "rapidocr" is accepted as an alias).  See ocr/factory.py.
+    ocr_engine: str = "mangaocr"
     ocr_device: str = "auto"  # auto | gpu | cpu
-    translation_backend: str = "argos"  # argos | libretranslate | identity
+    translation_backend: str = "argos"  # argos | libretranslate | gemini | identity
     translation_api_key: str = ""
     translation_api_url: str = "https://libretranslate.com"
     translate_device: str = "auto"  # auto | cuda | cpu
     models_dir: str = field(default_factory=lambda: str(default_models_dir()))
+    # Gemini provider (the API key lives in config/secrets.py, never here)
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_api_format: str = "native"  # native (x-goog-api-key, generateContent) | openai (Bearer, chat/completions)
+    gemini_base_url: str = "https://generativelanguage.googleapis.com"
+    gemini_timeout_s: float = 30.0
+    gemini_max_retries: int = 3
+    # Series context (Gemini only): the quick series name from the main tab and the editable
+    # system-prompt template with the [Series Name] placeholder; "" = the built-in template.
+    series_name: str = ""
+    series_prompt_template: str = ""
     # overlay
     overlay_opacity: float = 0.10  # background alpha, 0..1
     hide_original: bool = True  # paint bg-colored box under translation

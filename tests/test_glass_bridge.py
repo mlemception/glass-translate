@@ -57,6 +57,13 @@ def _frame(luma: float, t: float, dpr: float = 1.0) -> BackdropFrame:
         ("refreshHz", 4.5, "refresh_hz"),
         ("debounceMs", 250, "debounce_ms"),
         ("minConfidence", 0.7, "min_confidence"),
+        ("geminiModel", "gemini-2.5-flash-lite", "gemini_model"),
+        ("geminiApiFormat", "openai", "gemini_api_format"),
+        ("geminiBaseUrl", "https://gateway.example/google-ai-studio", "gemini_base_url"),
+        ("geminiTimeoutS", 12.0, "gemini_timeout_s"),
+        ("geminiMaxRetries", 5, "gemini_max_retries"),
+        ("seriesName", "Jujutsu Kaisen", "series_name"),
+        ("seriesPromptTemplate", "Translate [Series Name] lines.", "series_prompt_template"),
     ],
 )
 def test_config_property_round_trip_and_save(tmp_path: Path, prop: str, value, attr: str) -> None:
@@ -148,17 +155,83 @@ def test_hotkey_property_setter_stores_verbatim(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------------ backend flags (section 3)
+def test_set_gemini_api_key_stores_outside_config_and_rebuilds_translator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4-4 review fix: the key is not in AppConfig, so the config diff cannot rebuild the translator;
+    ``models_changed`` (wired to ``Pipeline.refresh_models``) must fire instead."""
+    from glasstranslate.config import secrets as S
+
+    monkeypatch.setenv(S.SECRETS_FILE_ENV, str(tmp_path / "secrets.json"))
+    monkeypatch.delenv(S.GEMINI_API_KEY_ENV, raising=False)
+    bridge, cfg, fired = _bridge(tmp_path, AppConfig(translation_backend="gemini"))
+    rebuilds: List[int] = []
+    bridge.models_changed.connect(lambda: rebuilds.append(1))
+    notified: List[int] = []
+    bridge.geminiApiKeyChanged.connect(lambda: notified.append(1))
+    assert bridge.geminiApiKeySet is False and bridge.geminiApiKeyHint == "No key stored"
+    assert bridge.setGeminiApiKey("  AIzaFAKE-SECRET-1234567890  ") is True
+    assert bridge.geminiApiKeySet is True and rebuilds == [1] and notified == [1]
+    assert "AIzaFAKE-SECRET" not in bridge.geminiApiKeyHint and bridge.geminiApiKeyHint.endswith("90)")
+    assert "AIzaFAKE" not in json.dumps(cfg.to_dict())
+    bridge.save_now()
+    assert "AIzaFAKE" not in (tmp_path / "config.json").read_text(encoding="utf-8")
+    assert S.get_gemini_api_key() == "AIzaFAKE-SECRET-1234567890"
+    assert bridge.setGeminiApiKey("") is True
+    assert bridge.geminiApiKeySet is False and rebuilds == [1, 1]
+
+
 def test_backend_flags(tmp_path: Path) -> None:
     """Deliberate changes 1-2: Download and Sugoi share the argos rule; models dir is always on."""
     bridge, cfg, _ = _bridge(tmp_path, AppConfig(translation_backend="argos"))
     assert bridge.backendArgos is True and bridge.backendOnline is False
+    assert bridge.backendGemini is False and bridge.backendLibre is False
     bridge.translationBackend = "libretranslate"
-    assert bridge.backendArgos is False and bridge.backendOnline is True
+    assert bridge.backendArgos is False and bridge.backendOnline is True and bridge.backendLibre is True
+    bridge.translationBackend = "gemini"
+    assert bridge.backendGemini is True and bridge.backendOnline is True and bridge.backendLibre is False
     bridge.translationBackend = "identity"
-    assert bridge.backendArgos is False and bridge.backendOnline is False
+    assert bridge.backendArgos is False and bridge.backendOnline is False and bridge.backendGemini is False
     # The models dir stays editable for every backend: the setter is never gated.
     bridge.modelsDir = "D:/m"
     assert cfg.models_dir == "D:/m"
+
+
+def test_series_name_is_trimmed_collapsed_and_capped(tmp_path: Path) -> None:
+    bridge, cfg, fired = _bridge(tmp_path)
+    bridge.seriesName = "  Jujutsu   Kaisen \t "
+    assert cfg.series_name == "Jujutsu Kaisen"
+    bridge.seriesName = "x" * 200
+    assert len(cfg.series_name) == 80
+    bridge.seriesPromptTemplate = "a\r\nb\r\n" + "t" * 5000
+    assert cfg.series_prompt_template.startswith("a\nb\n") and len(cfg.series_prompt_template) == 4000
+    assert len(fired) == 3
+
+
+def test_gemini_numeric_fields_are_clamped(tmp_path: Path) -> None:
+    bridge, cfg, _ = _bridge(tmp_path)
+    bridge.geminiTimeoutS = 0
+    assert cfg.gemini_timeout_s == 1.0
+    bridge.geminiTimeoutS = 9999
+    assert cfg.gemini_timeout_s == 300.0
+    bridge.geminiMaxRetries = -3
+    assert cfg.gemini_max_retries == 0
+    bridge.geminiMaxRetries = 99
+    assert cfg.gemini_max_retries == 10
+
+
+def test_gemini_lists(tmp_path: Path) -> None:
+    bridge, _, _ = _bridge(tmp_path, AppConfig(gemini_model="custom-model"))
+    models = [i["value"] for i in bridge.geminiModels]
+    assert "gemini-3.8-flash" in models and models[-1] == "custom-model"
+    assert [i["value"] for i in bridge.geminiApiFormats] == ["native", "openai"]
+
+
+def test_reset_prompt_template_clears_to_builtin(tmp_path: Path) -> None:
+    bridge, cfg, fired = _bridge(tmp_path, AppConfig(series_prompt_template="custom [Series Name]"))
+    bridge.resetPromptTemplate()
+    assert cfg.series_prompt_template == "" and len(fired) == 1
+    assert "[Series Name]" in bridge.defaultPromptTemplate()
 
 
 # ---------------------------------------------------------------------------------- lists
@@ -171,7 +244,7 @@ def test_lists_and_unknown_value_rule(tmp_path: Path) -> None:
     assert bridge.ocrDevices[-1] == {"value": "npu", "text": "npu"}
     assert [i["value"] for i in bridge.ocrDevices][:3] == ["auto", "gpu", "cpu"]
     assert "argos" in [i["value"] for i in bridge.backends]
-    assert "rapidocr" in [i["value"] for i in bridge.ocrEngines]
+    assert "mangaocr" in [i["value"] for i in bridge.ocrEngines] and "paddleocr" in [i["value"] for i in bridge.ocrEngines]
     assert bridge.fontFamilies[-1] == "Nope Sans"
     notified: List[str] = []
     bridge.listsChanged.connect(lambda: notified.append("lists"))
@@ -222,14 +295,14 @@ def test_download_strings() -> None:
 
 
 class _FakeWorker(QObject):
-    """Stands in for ModelDownloadWorker: never touches the network."""
+    """Stands in for ModelDownloadWorker / MangaOcrDownloadWorker: never touches the network."""
 
     progress = Signal(int, int)
     finished_ok = Signal(str)
     failed = Signal(str)
     instances: List["_FakeWorker"] = []
 
-    def __init__(self, models_dir, from_code, to_code, parent=None, *, sugoi=False):
+    def __init__(self, models_dir, from_code="", to_code="", parent=None, *, sugoi=False):
         super().__init__(parent)
         self.args = (models_dir, from_code, to_code, sugoi)
         self._running = False
@@ -248,6 +321,30 @@ class _FakeWorker(QObject):
     def fail(self, message: str):
         self._running = False
         self.failed.emit(message)
+
+
+def test_manga_ocr_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F3: the Engines page can fetch the manga-ocr ONNX bundle through the same progress row."""
+    monkeypatch.setattr(C, "MangaOcrDownloadWorker", _FakeWorker)
+    _FakeWorker.instances.clear()
+    bridge, cfg, _ = _bridge(tmp_path, AppConfig(models_dir=str(tmp_path / "m")))
+    models_changed: List[int] = []
+    bridge.models_changed.connect(lambda: models_changed.append(1))
+    assert bridge.mangaOcrModelsReady is False
+    bridge.downloadMangaOcr()
+    worker = _FakeWorker.instances[-1]
+    assert worker.args[0] == str(tmp_path / "m")
+    assert bridge.downloadActive and bridge.downloadVisible and "manga-ocr" in bridge.downloadLabel
+    bridge.downloadMangaOcr()
+    assert bridge.statusMessage == "A download is already running." and len(_FakeWorker.instances) == 1
+    worker.progress.emit(50_000_000, 201_600_000)
+    assert bridge.downloadProgress == 24 and "manga-ocr" in bridge.downloadLabel
+    worker.finish(str(tmp_path / "m" / "manga-ocr"))
+    assert not bridge.downloadActive and models_changed == [1]
+    assert "manga-ocr" in bridge.statusMessage
+    bridge.downloadMangaOcr()
+    _FakeWorker.instances[-1].fail("sha256 mismatch")
+    assert bridge.statusMessage.startswith("Download failed: sha256 mismatch")
 
 
 def test_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,3 +458,47 @@ def test_bridge_backdrop_geometry_is_logical_at_dpr_1_5(tmp_path: Path) -> None:
     assert bridge.backdropOrigin.x() == pytest.approx(-32 / 1.5)
     assert bridge.backdropSize.width() == pytest.approx(1312 / 1.5)
     assert bridge.backdropSize.height() == pytest.approx(1024 / 1.5)
+
+
+def test_backdrop_shift_is_zero_when_frame_matches_window(tmp_path: Path) -> None:
+    """A frame grabbed for the window's current rect (and no frame at all) needs no compensation."""
+    bridge, _cfg, _ = _bridge(tmp_path)
+    assert bridge.backdropShift.x() == 0 and bridge.backdropShift.y() == 0
+    bridge.set_window_origin(100, 100)
+    bridge.push_backdrop(_frame(0.5, time.perf_counter()))  # window_rect at (100, 100)
+    assert bridge.backdropShift.x() == 0 and bridge.backdropShift.y() == 0
+
+
+def test_backdrop_shift_is_zero_before_the_first_move_event(tmp_path: Path) -> None:
+    """Unknown window origin (no moveEvent yet) must not produce a bogus shift."""
+    bridge, _cfg, _ = _bridge(tmp_path)
+    bridge.push_backdrop(_frame(0.5, time.perf_counter()))
+    assert bridge.backdropShift.x() == 0 and bridge.backdropShift.y() == 0
+
+
+def test_backdrop_shift_tracks_a_moved_window(tmp_path: Path) -> None:
+    """Window moved right/down after the grab -> the stale frame is drawn left/up by the same
+    amount in logical px, so it stays desktop-aligned until the next frame lands."""
+    bridge, _cfg, _ = _bridge(tmp_path)
+    shifts: List[tuple] = []
+    bridge.backdropShiftChanged.connect(lambda: shifts.append((bridge.backdropShift.x(), bridge.backdropShift.y())))
+    bridge.set_window_origin(100, 100)
+    bridge.push_backdrop(_frame(0.5, time.perf_counter(), dpr=1.5))  # grabbed at (100, 100)
+    bridge.set_window_origin(140, 110)
+    assert bridge.backdropShift.x() == pytest.approx(-40 / 1.5)
+    assert bridge.backdropShift.y() == pytest.approx(-10 / 1.5)
+    bridge.set_window_origin(140, 110)  # unchanged origin: no notify
+    assert len(shifts) == 1
+
+
+def test_backdrop_shift_resets_when_a_fresh_frame_lands(tmp_path: Path) -> None:
+    bridge, _cfg, _ = _bridge(tmp_path)
+    bridge.set_window_origin(100, 100)
+    bridge.push_backdrop(_frame(0.5, time.perf_counter()))
+    bridge.set_window_origin(140, 110)
+    assert bridge.backdropShift.x() == -40 and bridge.backdropShift.y() == -10
+    stale = _frame(0.5, time.perf_counter())
+    fresh = BackdropFrame(stale.image, (108, 78), Rect(140, 110, 832, 640), 1.0, 0.5, stale.timestamp)
+    bridge.push_backdrop(fresh)
+    assert bridge.backdropShift.x() == 0 and bridge.backdropShift.y() == 0
+    assert bridge.backdropOrigin.x() == -32 and bridge.backdropOrigin.y() == -32

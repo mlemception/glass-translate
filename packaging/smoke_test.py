@@ -454,11 +454,26 @@ def run_b(sb: Sandbox, res: Results, mechanics: bool) -> Launch:
         res.add("B", "smoke report written", False, f"{lau.report_path.name} missing {lau.error}".strip())
         return lau
     hist = [str(s) for s in rep.get("status_history") or []]
-    res.add("B", 'status_history has "OCR: rapidocr on ..."', any(s.startswith("OCR: rapidocr on") for s in hist),
-            next((s for s in hist if s.startswith("OCR: rapidocr on")), f"{hist[-3:]}"))
+    # Feature batch 2026-09-09: the default engine is manga-ocr with the rapidocr-backed PaddleOCR
+    # (PP-OCRv5) fallback; a bare exe has no manga-ocr models yet, so either engine may report.
+    ocr_lines = [s for s in hist if s.startswith("OCR: ")]
+    engines = ("OCR: mangaocr on", "OCR: paddleocr on", "OCR: rapidocr on")
+    res.add("B", 'status_history has "OCR: <engine> on ..."', any(s.startswith(engines) for s in hist),
+            next((s for s in ocr_lines), f"{hist[-3:]}"))
     bad = [s for s in hist if s.startswith("Engine error") or s.startswith("Error:")]
     res.add("B", 'no "Engine error"/"Error:" status', not bad, "; ".join(bad)[:200])
+    _secret_leak_checks("B", rep, res)
     return lau
+
+
+_SECRET_MARKERS = ("AIza", "api_key", "gemini_api_key", "x-goog-api-key", "Bearer ")
+
+
+def _secret_leak_checks(tag: str, rep: Dict[str, Any], res: Results) -> None:
+    """The smoke report is a persisted artefact: no key material or secret field may appear in it."""
+    text = json.dumps(rep, ensure_ascii=False)
+    hits = [m for m in _SECRET_MARKERS if m in text]
+    res.add(tag, "report contains no secret markers", not hits, ", ".join(hits))
 
 
 def run_c(sb: Sandbox, res: Results, mechanics: bool) -> None:

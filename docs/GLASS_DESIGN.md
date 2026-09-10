@@ -2,7 +2,9 @@
 
 Contract for the redesign of the settings/control window (`glasstranslate/ui/control.py`) and
 the PyInstaller build. The **glass overlay (`overlay.py`) is out of scope** except for loading its
-fonts from Qt resources. Everything below was de-risked by the probes under
+fonts from Qt resources and the two deliberate exceptions of the 2026-09-09 feature batch (F1
+capture mode): `GlassOverlay.set_capture_excluded(bool)` and the stored capture affinity that
+`showEvent` re-applies (see §2.3 "Misc" and §3 `overlayCaptureMode`). Everything below was de-risked by the probes under
 `demo/output/probes/` (reports in `demo/output/probes/reports/*.md`); numbers quoted there are
 measured on this machine (Win 11 26200, RTX 4080, one 5120x1440 monitor at DPR 1.0).
 
@@ -46,7 +48,8 @@ app.py ─ GlassTranslateApp ─┬─ ControlWindow (QQuickView subclass, frame
   `glasstranslate/ui/__init__.py` and `app.py` keep working). Public contract (unchanged, all used
   by `app.py`):
   - signals `config_changed(object)`, `start_stop_requested(bool)`, `grab_mode_requested()`,
-    `toggle_glass_requested()`, `models_changed()`, `closed()`;
+    `toggle_glass_requested()`, `capture_mode_requested(bool)` (F1, runtime only), `models_changed()`,
+    `closed()`;
   - methods `show()`, `load_config(cfg)`, `set_running(bool)`, `update_stats(PipelineStats)`,
     `show_status(str)`, `save_soon()`, `save_now()`, property `config`;
   - constructor `ControlWindow(cfg: AppConfig, config_path: Optional[Path] = None, parent=None)`.
@@ -104,6 +107,15 @@ app.py ─ GlassTranslateApp ─┬─ ControlWindow (QQuickView subclass, frame
   `Image.implicitWidth` is the *physical* width and would magnify the backdrop by the DPR at
   125 % / 150 % (verified at `QT_SCALE_FACTOR=1.5`: 1312 physical px became 1312 logical px, a
   6-px stripe shift and no correlation with the desktop; with `backdropSize` the best shift is 0).
+- `backdropShift` (QPointF, **logical**; F2-1, 2026-09-10): `(frame.window_rect.origin -
+  currentWindowPhysicalOrigin) / dpr`. `GlassControlWindow.moveEvent` feeds the current physical
+  origin through `bridge.set_window_origin(x, y)` (two ints, nothing else on the GUI thread);
+  `push_backdrop` records the origin the frame was grabbed for; the property is zero before the
+  first frame and before the first move, and notifies only when the value changes. `Main.qml`
+  draws `backdropLayer` at `backdropOrigin + backdropShift`, so a frame grabbed before the last
+  move stays aligned with the desktop content it shows instead of trailing the window until the
+  next grab lands (measured 2–6 px per frame at 500 px/s before the fix:
+  `docs/perf/2026-09-09-glass-baseline.md`, hypothesis a).
 - `backdropLuma` (0..1): mean luma over the **slab rect only** (the margin is cropped before the mean;
   the ink never sits on it), EMA with tau 250 ms. Polarity state machine in the bridge (property
   `inkPolarity`, int 0/1, notify; `0` = dark material + light ink, `1` = light material + dark ink):
@@ -149,7 +161,7 @@ polarity only when `mode == "glass"` (the grabber is paused otherwise, so `backd
 ### 2.1 Layers (Main.qml, top to bottom)
 ```
 Item root (window size W x H)                        // root = window; W = slab.width + 72, H = slab.height + 80
-  Item   backdropLayer    x: bridge.backdropOrigin.x, y: ..origin.y, size = bridge.backdropSize (logical; window + 2*MARGIN/dpr nominal)
+  Item   backdropLayer    x: bridge.backdropOrigin.x + bridge.backdropShift.x, y: likewise, size = bridge.backdropSize (logical; window + 2*MARGIN/dpr nominal)
     Image backdrop        source: "image://backdrop/"+bridge.backdropSerial, cache:false, smooth:true
   ShaderEffectSource sharpSrc { sourceItem: backdropLayer; hideSource: true; live: true; smooth: true;
                                 textureSize: Qt.size(backdropLayer.width*dpr, backdropLayer.height*dpr) }
@@ -395,7 +407,9 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   construction), `squircle 2`, sampling a local `ShaderEffectSource` of the track + labels layer; its
   **left and right edges animate separately** (`leadEdge` with `springLead`, `trailEdge` with
   `springTrail`, lead = edge in the travel direction) so it stretches toward the destination then
-  settles. Labels: selected → `Theme.ink`, others `Theme.inkSecondary`; keyboard Left/Right; focus
+  settles; both springs stop at `epsilon: 0.25` (a quarter logical px — the Qt default 0.01 px kept
+  the whole scene rendering ≈ 1.3 s after each switch, now ≈ 1.0 s; the remainder is `springTrail`'s
+  physical settle, see §2.4). Labels: selected → `Theme.ink`, others `Theme.inkSecondary`; keyboard Left/Right; focus
   ring per the rule above.
 - `GlassButton.qml` (`T.Button`): `text`, `primary` (accent blended at 22 % over the fill),
   `checkable/checked`, `iconGlyph` optional; press → `scale .965` with
@@ -445,17 +459,35 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   placeholder "-" until the first pass.
 - Pages (`pages/*.qml`), each a `Flickable` column of `GlassCard`s, bound to `bridge` properties:
   - `TranslatePage`: card "Languages": Source (`GlassComboBox`, "Auto-detect" first), Target;
+    card "Series" (F5): Series name (`GlassTextField`, `objectName seriesNameField`, bound to
+    `bridge.seriesName`; trimmed, whitespace-collapsed, 80 chars max; hint names the Gemini-only use);
     card "Session": `GlassButton primary checkable text: bridge.running ? "Stop" : "Start"` (wide),
     `Grab mode`, `Show / hide glass`; hint lines with the current hotkeys.
   - `OverlayPage`: card "Glass": Background opacity (`GlassSlider 0..100 %`, `live: true` so the
     overlay previews while dragging), Font (`GlassFontComboBox`), Hide original (`GlassToggle`);
     card "Typesetting": Manga mode toggle, Uppercase toggle (disabled when manga off), hints = the
-    old tooltips.
+    old tooltips; card "Misc": Capture mode (`GlassToggle`, `objectName captureModeToggle`) bound
+    to the runtime-only `bridge.overlayCaptureMode` — on: the *overlay* window clears
+    `WDA_EXCLUDEFROMCAPTURE` (`win32.set_capture_excluded(window, False)`) so screenshot /
+    screen-recording tools see the glass, and the pipeline is paused (its own grabs would OCR the
+    lettering); off: re-excluded, resumed iff `running_on_start`. Never persisted, starts off every
+    session, cleared again at shutdown; the control window itself stays excluded (its backdrop
+    grabber would otherwise sample the panel).
   - `EnginesPage`: card "OCR": engine, device; card "Translation": backend, translate device
     (enabled iff argos), API URL + API key (password; enabled iff libretranslate), Models dir
     (`GlassTextField` + Browse, always enabled), buttons `Download model…` and `Get Sugoi (ja→en)…`
     (both enabled iff argos — a deliberate change, §3), inline progress row
-    (`bridge.downloadActive/Label/Progress`, Hide button); card "Pipeline": Refresh rate
+    (`bridge.downloadActive/Label/Progress`, Hide button); card "Gemini" (F4, `objectName geminiCard`,
+    visible iff `bridge.backendGemini`): Model (`GlassComboBox` over `bridge.geminiModels`, presets +
+    unknown-value rule), API format (`native` / `openai`), Base URL, API key (`GlassTextField password`,
+    **write-only**: commits through `bridge.setGeminiApiKey(text)` into the user secret store
+    `%LOCALAPPDATA%/GlassTranslate/secrets.json`, is cleared after commit and only
+    `bridge.geminiApiKeySet` / a redacted `geminiApiKeyHint` are readable), Timeout (1–300 s), Retries
+    (0–10); card "Series context" (F5): System prompt (`GlassTextArea`, `objectName templateArea`,
+    bound to `bridge.seriesPromptTemplate`, placeholder = the built-in template; `[Series Name]` is
+    substituted case-insensitively at request time, an empty stored template means "built-in", a
+    malformed one falls back to the built-in with one status warning) and `Reset to default`
+    (`bridge.resetPromptTemplate()`, enabled iff a custom template is stored); card "Pipeline": Refresh rate
     (`GlassStepper 0.5–60 step .5 " Hz"`), Debounce (`0–2000 step 10 " ms"`), Min OCR confidence
     (`0–1 step .05, 2 decimals`).
   - `HotkeysPage`: card "Global hotkeys" (hint "pynput syntax, e.g. <ctrl>+<alt>+g"): Toggle grab
@@ -483,6 +515,10 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
 - Page transition ≤ 180 ms. Nothing loops, nothing animates while idle (the only continuous update
   is the 15 Hz backdrop and that only when the desktop behind changed; the pointer highlight
   re-renders only while the pointer moves over the window).
+- Known gap (measured 2026-09-10, `docs/perf/2026-09-09-glass-baseline.md`): the tab indicator's
+  two springs keep the scene rendering at full refresh for ≈ 1.0 s after a switch (≈ 1.3 s before
+  `epsilon: 0.25`). Getting under the 180 ms line needs more damping on `springLead` /
+  `springTrail`, i.e. a motion-spec change — open decision, not taken in the F2 slice.
 
 ## 3. Python bridge (`glasstranslate/ui/control.py`)
 
@@ -500,11 +536,28 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   it is `auto, cpu` and a stored `cuda` is appended by the unknown-value rule with the hint "CUDA is
   not available in the packaged build; translation runs on CPU" (the exe prunes `nvidia/` and cuDNN,
   so an explicit `cuda` fails at engine construction).
-- Derived flags: `backendOnline` (libretranslate), `backendArgos`.
-- State: `running`, `statusMessage` (initial value `"Ready"`), `stats` (QObject: `totalText "12.3 ms"`,
+- Derived flags: `backendOnline` (libretranslate or gemini), `backendArgos`, `backendLibre`, `backendGemini`.
+- Gemini (F4): config properties `geminiModel`, `geminiApiFormat` (`native`|`openai`), `geminiBaseUrl`,
+  `geminiTimeoutS` (clamped 1–300), `geminiMaxRetries` (0–10); lists `geminiModels`, `geminiApiFormats`;
+  read-only `geminiApiKeySet` / `geminiApiKeyHint` (redacted); slot `setGeminiApiKey(str) -> bool`
+  writes `config/secrets.py` (never `AppConfig`) and emits `config_changed` so the translator rebuilds.
+- Series context (F5): config properties `seriesName` (trim, collapse, ≤ 80) and
+  `seriesPromptTemplate` (≤ 4000; `""` = built-in); slots `defaultPromptTemplate() -> str`,
+  `resetPromptTemplate()`.
+- Component inventory additions: `GlassTextArea` (`T.TextArea`, `lines`, `committed(text)` on
+  focus loss / Ctrl+Enter, same fill material + focus ring as `GlassTextField`).
+- Module split (F4-5): `bridge_fields.py` (LANGUAGES, `_CONFIG_FIELDS`, coercers, `_config_property`,
+  `format_stats`, `download_label/progress`, `translate_device_items`, `is_frozen`),
+  `stats_model.py` (`StatsModel`) and `download_workers.py` (`ModelDownloadWorker`,
+  `MangaOcrDownloadWorker`) are re-exported by `control.py`; import sites are unchanged.
+- OCR (F3): `ocrEngines` lists `mangaocr` / `paddleocr` with `ocr.factory.engine_label` texts;
+  `mangaOcrModelsReady` (re-read on `downloadChanged`), slot `downloadMangaOcr()` reuses the
+  progress row and emits `models_changed` on success (the pipeline rebuilds the OCR chain).
+- State: `running`, `overlayCaptureMode` (read/write, runtime only — never touches `AppConfig`;
+  a set emits `capture_mode_requested(bool)`), `statusMessage` (initial value `"Ready"`), `stats` (QObject: `totalText "12.3 ms"`,
   `fpsText "8.1"`, `stagesText`, `segmentsText`, `cacheText`, `devicesText` — exact same formatting as
   the old `update_stats`), `downloadActive`, `downloadLabel`, `downloadProgress` (-1 = indeterminate,
-  else 0..100), `backdropSerial`, `backdropOrigin`, `backdropLuma`, `inkPolarity` (§1.2), `windowTitle`.
+  else 0..100), `backdropSerial`, `backdropOrigin`, `backdropShift`, `backdropLuma`, `inkPolarity` (§1.2), `windowTitle`.
 - Slots: `startStop(bool)`, `grabMode()`, `toggleGlass()`, `browseModelsDir()`,
   `downloadModel(bool sugoi)`, `hideDownload()`, `setHotkey(str which, str text) -> bool`,
   `startMove()` → `startSystemMove()` (only valid from a QML `onPressed`), `startResize(int edges)`
@@ -606,7 +659,8 @@ System32/Windows/Wbem/PowerShell, no `PYTHON*`/`QT_*`/`VIRTUAL_ENV`, no inherite
   inset 40 px, RGB std ≥ 8 inside (a solid fallback or a dead shader path is flat), tab-bar row mean
   |diff| vs the slab ≥ 6.
 - run B (temp config with `running_on_start=true`, `translation_backend="identity"`, AUTOEXIT 20000):
-  `status_history` contains a message starting `"OCR: rapidocr on"` and none starting `"Engine error"`
+  `status_history` contains a message starting `"OCR: <engine> on"` (`mangaocr`, or `paddleocr` when the
+  manga-ocr models are not downloaded yet — the bare smoke exe never has them) and none starting `"Engine error"`
   or `"Error:"` (exercises the rapidocr / py3langid data in the frozen tree, which only fail at engine
   construction).
 - run C (onefile lifecycle): start with AUTOEXIT 60000, wait for the report, `taskkill //F //PID`,
@@ -695,6 +749,14 @@ the CPU-only translation, and that Win+Arrow snapping is unsupported (§1.1).
   with 0 frames rendered, desktop scrolling behind the panel 5.1–5.5 % at 25.7 fps (103 grabs, 103
   emits per 8 s = one rendered frame per backdrop update), grabber median 6.7–7.1 ms / p90 8.5–8.8 ms,
   pointer sweep over the panel 10.0 % at 109 fps, back to 1.9–2.7 % and 0 frames within 0.8 s.
+- Profiling hooks (F2-0): `GLASSTRANSLATE_PROFILE=1` switches `glasstranslate/ui/glass/profile.py`
+  on (`move` / `poke` / `grab` / `frame_gui` / `push_backdrop_ms` / `swap` / `tab` marks; a no-op
+  object when unset, one attribute lookup per hook; the `frameSwapped` hook is a *queued*
+  connection — a direct Python slot on the render thread deadlocks on the GIL).
+  `tools/profile_glass.py` drives the real window on screen (scripted drag, 4-tab burst, idle)
+  and writes `demo/output/perf/glass-profile-<ts>.jsonl` plus a summary. Baseline and post-F2
+  numbers: `docs/perf/2026-09-09-glass-baseline.md` (240 Hz, 240 x 2 px drag: 48 % of one core
+  at ~137 grabs/s, tab transitions every refresh, idle 2.3 % / 0 swaps once settled).
 - Accessibility: force each mode via `GLASSTRANSLATE_APPEARANCE` (§1.3 tokens) and screenshot each;
   Narrator announces every control by its FormRow label; keyboard-only pass through the tab order.
 

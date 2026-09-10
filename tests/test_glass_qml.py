@@ -9,17 +9,21 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Dict, List
 
 import pytest
 from PySide6.QtCore import QObject, QUrl
+from PySide6.QtGui import QImage
 from PySide6.QtQml import QQmlComponent, QQmlExpression, qmlContext
 from PySide6.QtQuick import QQuickItem, QQuickView
 
 from glasstranslate.config.settings import AppConfig
+from glasstranslate.core.types import Rect
 from glasstranslate.ui import control as C
 from glasstranslate.ui.glass.appearance import AppearanceSignals
+from glasstranslate.ui.glass.backdrop import BackdropFrame
 
 ROOT = Path(__file__).resolve().parents[1]
 QML_DIR = ROOT / "glasstranslate" / "ui" / "qml"
@@ -68,6 +72,34 @@ def test_window_loads_clean(window: C.ControlWindow) -> None:
     assert window.rootContext().contextProperty("bridge") is window.bridge
     assert window.rootContext().contextProperty("appearance") is window.appearance
     assert window.engine().imageProvider("backdrop") is not None
+
+
+def test_backdrop_layer_applies_frame_offset(window: C.ControlWindow, qapp) -> None:
+    """F2-1: backdropLayer (and the blur chain anchored to it) follows bridge.backdropShift."""
+    root = window.rootObject()
+    image = QImage(896, 704, QImage.Format.Format_RGB32)
+    frame = BackdropFrame(image, (68, 68), Rect(100, 100, 832, 640), 1.0, 0.5, time.perf_counter())
+    window.bridge.set_window_origin(100, 100)
+    window._on_backdrop_frame(frame)
+    qapp.processEvents()
+    assert _qml_value(root, "backdropLayer.x") == -32 and _qml_value(root, "backdropLayer.y") == -32
+    window.bridge.set_window_origin(140, 110)
+    qapp.processEvents()
+    assert _qml_value(root, "backdropLayer.x") == -72 and _qml_value(root, "backdropLayer.y") == -42
+    assert _qml_value(root, "blurH1.x") == -72 and _qml_value(root, "blurV2.y") == -42
+
+
+def test_segmented_bar_springs_settle_within_a_quarter_pixel(window: C.ControlWindow) -> None:
+    """F2-3: SpringAnimation's default epsilon (0.01 px) keeps the render loop alive ~1.2 s after
+    every tab switch; a quarter logical px is invisible and settles inside the 180 ms budget."""
+    comp = QQmlComponent(window.engine(), QUrl("qrc:/qml/GlassSegmentedBar.qml"))
+    obj = comp.create()
+    assert obj is not None, [e.toString() for e in comp.errors()]
+    try:
+        for spring in ("springL", "springR"):
+            assert _qml_value(obj, f"{spring}.epsilon") == pytest.approx(0.25)
+    finally:
+        obj.deleteLater()
 
 
 def test_window_is_fixed_size(window: C.ControlWindow) -> None:
@@ -172,6 +204,81 @@ def test_bridge_property_through_window(window: C.ControlWindow, tmp_path: Path,
         data = data[part]
     assert data == value
     assert _qml_value(window.rootObject(), f"bridge.{prop}") == value
+
+
+def test_overlay_page_has_capture_mode_toggle(window: C.ControlWindow) -> None:
+    """F1: card "Misc" on the Overlay page hosts the runtime-only capture-mode toggle."""
+    toggle = window.rootObject().findChild(QQuickItem, "captureModeToggle")
+    assert toggle is not None
+    assert _qml_value(toggle, "checked") is False
+    assert _qml_value(toggle, "Accessible.name")
+    assert "capture" in str(_qml_value(toggle, "Accessible.description")).lower()
+
+
+def test_capture_mode_toggle_round_trip(window: C.ControlWindow, qapp) -> None:
+    root = window.rootObject()
+    toggle = root.findChild(QQuickItem, "captureModeToggle")
+    assert toggle is not None
+    root.findChild(QQuickItem, "tabBar").setProperty("currentIndex", 1)  # inactive pages are disabled
+    qapp.processEvents()
+    assert _qml_value(toggle, "enabled") is True
+    requests: List[bool] = []
+    window.capture_mode_requested.connect(requests.append)
+    fired: List[AppConfig] = []
+    window.config_changed.connect(fired.append)
+    window.bridge.overlayCaptureMode = True
+    assert _qml_value(toggle, "checked") is True
+    _qml_value(toggle, "click()")  # the user clicks it off (click() emits toggled; toggle() does not)
+    assert window.bridge.overlayCaptureMode is False
+    assert requests == [True, False]
+    assert fired == []  # never a config change
+
+
+def test_engines_page_gemini_card_follows_backend(window: C.ControlWindow, qapp) -> None:
+    """F4: the Gemini card is shown iff the gemini backend is selected; the key field is password."""
+    root = window.rootObject()
+    root.findChild(QQuickItem, "tabBar").setProperty("currentIndex", 2)  # inactive pages are disabled/hidden
+    qapp.processEvents()
+    card = root.findChild(QQuickItem, "geminiCard")
+    key = root.findChild(QQuickItem, "geminiApiKeyField")
+    assert card is not None and key is not None
+    # ``visible`` is effective (ancestors count) and the page crossfade is animated, so assert the
+    # card's own binding source plus its layout height instead of the effective flag.
+    assert _qml_value(card, "bridge.backendGemini") is False
+    window.bridge.translationBackend = "gemini"
+    qapp.processEvents()
+    assert _qml_value(card, "bridge.backendGemini") is True
+    assert float(_qml_value(card, "height")) > 0
+    assert _qml_value(key, "password") is True
+    assert _qml_value(key, "echoMode") == 2  # TextInput.Password
+    assert _qml_value(key, "text") == ""  # the stored key is never redisplayed
+    assert _qml_value(root.findChild(QQuickItem, "geminiModelCombo"), "value") == "gemini-3.8-flash"
+
+
+def test_translate_page_has_series_field_and_engines_page_template_editor(window: C.ControlWindow, qapp) -> None:
+    """F5: quick series name on the main tab, the full template editor on the Engines tab."""
+    root = window.rootObject()
+    series = root.findChild(QQuickItem, "seriesNameField")
+    area = root.findChild(QQuickItem, "templateArea")
+    reset = root.findChild(QQuickItem, "resetTemplateButton")
+    assert series is not None and area is not None and reset is not None
+    assert _class_prefix(area) == "GlassTextArea"
+    root.findChild(QQuickItem, "tabBar").setProperty("currentIndex", 2)
+    qapp.processEvents()
+    assert _qml_value(reset, "enabled") is False  # built-in template in use
+    window.bridge.seriesName = "Jujutsu Kaisen"
+    window.bridge.seriesPromptTemplate = "Custom [Series Name] prompt"
+    qapp.processEvents()
+    assert _qml_value(series, "text") == "Jujutsu Kaisen"
+    assert _qml_value(area, "text") == "Custom [Series Name] prompt"
+    assert _qml_value(reset, "enabled") is True
+    _qml_value(reset, "click()")
+    assert window.config.series_prompt_template == ""
+    assert "[Series Name]" in str(_qml_value(area, "placeholder"))
+
+
+def _class_prefix(item: QObject) -> str:
+    return item.metaObject().className().split("_QML")[0]
 
 
 def test_public_contract_and_close(window: C.ControlWindow) -> None:

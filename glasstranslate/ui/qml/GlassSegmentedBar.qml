@@ -78,18 +78,25 @@ T.TabBar {
 
     // One spring per edge; the lead/trail parameters follow the travel direction
     // (a Behavior's animation object cannot be swapped while it is running).
+    // epsilon: the default 0.01 px settle keeps the render loop running ~1.2 s after every
+    // switch (measured: 332 swaps at 240 Hz, docs/perf/2026-09-09-glass-baseline.md); a
+    // quarter logical px is invisible and stops inside the 180 ms transition budget.
     Behavior on edgeL {
         id: behL
         SpringAnimation {
+            id: springL
             spring: bar.goingRight ? Theme.springTrail.spring : Theme.springLead.spring
             damping: bar.goingRight ? Theme.springTrail.damping : Theme.springLead.damping
+            epsilon: 0.25
         }
     }
     Behavior on edgeR {
         id: behR
         SpringAnimation {
+            id: springR
             spring: bar.goingRight ? Theme.springLead.spring : Theme.springTrail.spring
             damping: bar.goingRight ? Theme.springLead.damping : Theme.springTrail.damping
+            epsilon: 0.25
         }
     }
     SequentialAnimation {

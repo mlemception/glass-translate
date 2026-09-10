@@ -31,6 +31,7 @@ exception: errors are reported through ``on_status`` and the loop retries.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
@@ -78,19 +79,31 @@ _STOP_JOIN_GRACE_S = 0.25
 _SCRIPT_LANGUAGES = frozenset({"ja", "ko", "zh", "ru", "ar", "el", "th", "he"})
 # Source language used when nothing on the page is detectable.
 _FALLBACK_SRC = "en"
+# OCR engine whose plain-mode output goes through ``ocr.furigana.strip_furigana``.
+_FURIGANA_FILTERED_ENGINE = "paddleocr"
 
 # Config fields whose change requires rebuilding an engine.
-_OCR_FIELDS = ("ocr_engine", "ocr_device", "min_confidence")
+# ``models_dir`` is where the manga-ocr models live, so moving it rebuilds the
+# OCR chain as well as the translator.
+_OCR_FIELDS = ("ocr_engine", "ocr_device", "min_confidence", "models_dir")
 _TRANSLATOR_FIELDS = (
     "translation_backend",
     "translation_api_key",
     "translation_api_url",
     "translate_device",
     "models_dir",
+    "gemini_model",
+    "gemini_api_format",
+    "gemini_base_url",
+    "gemini_timeout_s",
+    "gemini_max_retries",
 )
 _DETECTOR_FIELDS = ("tile_size", "change_threshold")
 _LANGUAGE_FIELDS = ("source_lang", "target_lang")
 _LAYOUT_FIELDS = ("manga_mode",)
+# Series context: pushed to the translator without rebuilding it; the cache key carries the
+# translator's context digest, so a change only invalidates the live segments.
+_CONTEXT_FIELDS = ("series_name", "series_prompt_template")
 
 
 def _default_capture_factory(cfg: AppConfig) -> ScreenCapture:
@@ -99,10 +112,24 @@ def _default_capture_factory(cfg: AppConfig) -> ScreenCapture:
     return create_capture()
 
 
-def _default_ocr_factory(cfg: AppConfig) -> OCREngine:
+def _default_ocr_factory(cfg: AppConfig, status: Optional[StatusCallback] = None) -> OCREngine:
+    """Build the configured OCR engine; ``status`` receives the fallback
+    chain's transition lines ("OCR: mangaocr failed ...; using paddleocr")."""
     from ..ocr import create_ocr
 
-    return create_ocr(cfg.ocr_engine, cfg.ocr_device, cfg.min_confidence)
+    return create_ocr(
+        cfg.ocr_engine, cfg.ocr_device, cfg.min_confidence, models_dir=cfg.models_dir, status=status
+    )
+
+
+def _accepts_status(factory: Callable[..., object]) -> bool:
+    """True when ``factory(cfg, status=...)`` is a valid call (see
+    ``_default_ocr_factory``); injected test factories usually take ``cfg`` only."""
+    try:
+        inspect.signature(factory).bind(None, status=None)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _default_translator_factory(cfg: AppConfig) -> Translator:
@@ -225,7 +252,9 @@ class Pipeline(threading.Thread):
         on_status: receives human-readable progress / error messages.
         capture_factory, ocr_factory, translator_factory, detector_factory:
             engine constructors; the defaults build the real engines.  Tests
-            inject fakes here.
+            inject fakes here.  ``ocr_factory`` may take a second ``status``
+            keyword (a ``StatusCallback``) to receive the OCR fallback chain's
+            transition lines; ``cfg``-only factories work too.
     """
 
     def __init__(
@@ -236,7 +265,7 @@ class Pipeline(threading.Thread):
         on_status: StatusCallback,
         *,
         capture_factory: Callable[[AppConfig], ScreenCapture] = _default_capture_factory,
-        ocr_factory: Callable[[AppConfig], OCREngine] = _default_ocr_factory,
+        ocr_factory: Callable[..., OCREngine] = _default_ocr_factory,
         translator_factory: Callable[[AppConfig], Translator] = _default_translator_factory,
         detector_factory: Callable[[], LanguageDetector] = _default_detector_factory,
     ) -> None:
@@ -278,6 +307,8 @@ class Pipeline(threading.Thread):
         self._last_src = _FALLBACK_SRC
         self._last_tick = 0.0
         self._fps = 0.0
+        self._context_dirty = True  # push the series context to the (re)built translator
+        self._last_translator_error: Optional[str] = None
 
     # ------------------------------------------------------------- control
     @property
@@ -468,6 +499,9 @@ class Pipeline(threading.Thread):
                 self._rebuild_translator = True
             if any(getattr(old, f) != getattr(new, f) for f in _DETECTOR_FIELDS):
                 self._rebuild_change_detector = True
+            if any(getattr(old, f) != getattr(new, f) for f in _CONTEXT_FIELDS):
+                self._context_dirty = True
+                self._invalidate_requested = True
             if any(
                 getattr(old, f) != getattr(new, f)
                 for f in _OCR_FIELDS + _TRANSLATOR_FIELDS + _DETECTOR_FIELDS + _LANGUAGE_FIELDS + _LAYOUT_FIELDS
@@ -493,7 +527,7 @@ class Pipeline(threading.Thread):
             if self._rebuild_ocr or self._ocr is None:
                 self._ocr = None  # release the old engine before loading the new one
                 self._status(f"Loading OCR engine {cfg.ocr_engine} ({cfg.ocr_device})...")
-                ocr = self._ocr_factory(cfg)
+                ocr = self._build_ocr(cfg)
                 ocr.warmup()
                 self._ocr = ocr
                 self._rebuild_ocr = False
@@ -503,6 +537,8 @@ class Pipeline(threading.Thread):
                 self._status(f"Loading translator {cfg.translation_backend}...")
                 self._translator = self._translator_factory(cfg)
                 self._rebuild_translator = False
+                self._context_dirty = True
+                self._last_translator_error = None
                 self.cache.clear()  # entries from the old backend may be stale
                 if old_tr is not None:
                     old_tr.close()
@@ -518,7 +554,40 @@ class Pipeline(threading.Thread):
             self._status(f"Engine error: {exc}")
             self._next_engine_attempt = time.monotonic() + _ENGINE_RETRY_S
             return False
+        if self._context_dirty:
+            self._push_context()
         return True
+
+    def _push_context(self) -> None:
+        """Resolve the series prompt template and hand it to the translator (F5).
+
+        Only prompt-driven backends use it (``Translator.set_context`` is a no-op elsewhere).
+        A malformed template falls back to the built-in default and reports once via status.
+        """
+        from ..translate.context import DEFAULT_TEMPLATE, resolve_prompt
+
+        assert self._translator is not None
+        self._context_dirty = False
+        cfg = self._cfg
+        resolved = resolve_prompt(cfg.series_prompt_template or DEFAULT_TEMPLATE, cfg.series_name)
+        self._translator.set_context(resolved.prompt)
+        if resolved.warning and getattr(self._translator, "offline", True) is False:
+            self._status(resolved.warning)
+
+    def _report_translator_error(self) -> None:
+        """Surface a provider's ``last_error`` (Gemini) on the status strip once per distinct error."""
+        error = getattr(self._translator, "last_error", None)
+        if error == self._last_translator_error:
+            return
+        self._last_translator_error = error
+        if error:
+            self._status(str(error))
+
+    def _build_ocr(self, cfg: AppConfig) -> OCREngine:
+        """Call the OCR factory, handing it the status callback when it takes one."""
+        if _accepts_status(self._ocr_factory):
+            return self._ocr_factory(cfg, status=self._status)
+        return self._ocr_factory(cfg)
 
     def _close_engines(self) -> None:
         for engine in (self._capture, self._translator):
@@ -599,9 +668,23 @@ class Pipeline(threading.Thread):
             if crop.w < 2 or crop.h < 2:
                 continue
             image = frame.image[crop.y : crop.y2, crop.x : crop.x2]
-            for seg in self._ocr.recognize(image):
-                found.append(_offset_segment(seg, crop.x, crop.y))
+            found.extend(_offset_segment(seg, crop.x, crop.y) for seg in self._recognize_crop(image))
         return found
+
+    def _recognize_crop(self, image: np.ndarray) -> List[Segment]:
+        """One OCR call.  In plain mode the PaddleOCR engine's output loses its
+        furigana lines (ruby read as separate small kana lines, which would be
+        translated as noise); manga-ocr ignores furigana at recognition time
+        and manga mode has its own rule in ``render/layout.py``.  The engine
+        that served *this* call decides: a fallback chain may switch engines
+        between the crops of one tick, so the check is per call."""
+        assert self._ocr is not None
+        segments = self._ocr.recognize(image)
+        if self._cfg.manga_mode or self._ocr.name != _FURIGANA_FILTERED_ENGINE:
+            return segments
+        from ..ocr.furigana import strip_furigana
+
+        return strip_furigana(segments)
 
     def _group_blocks(
         self, frame: Frame, segments: Sequence[Segment]
@@ -670,6 +753,7 @@ class Pipeline(threading.Thread):
             return []
         assert self._translator is not None
         tgt = self._cfg.target_lang
+        context = self._translator.context_key()
         results: List[Optional[TranslatedSegment]] = [None] * len(styled)
         misses: Dict[str, List[int]] = {}
         for i, s in enumerate(styled):
@@ -677,7 +761,7 @@ class Pipeline(threading.Thread):
             if s.src_lang == tgt or not text.strip():
                 results[i] = TranslatedSegment(styled=s, translation=text, tgt_lang=tgt)
                 continue
-            cached = self.cache.get(text, s.src_lang, tgt)
+            cached = self.cache.get(text, s.src_lang, tgt, context)
             if cached is not None:
                 results[i] = TranslatedSegment(styled=s, translation=cached, tgt_lang=tgt, from_cache=True)
             else:
@@ -691,6 +775,7 @@ class Pipeline(threading.Thread):
                 break
             texts = [styled[i].segment.text for i in indices]
             translations = self._translator.translate_batch(texts, src, tgt)
+            self._report_translator_error()
             if len(translations) != len(texts):
                 log.warning("translator returned %d results for %d inputs", len(translations), len(texts))
                 translations = texts
@@ -703,7 +788,7 @@ class Pipeline(threading.Thread):
                     # Backends return the input unchanged when they cannot
                     # translate.  Never cache that, so a model installed later
                     # (refresh_models) takes effect without a restart.
-                    self.cache.put(source, src, tgt, translation)
+                    self.cache.put(source, src, tgt, translation, context)
                 results[i] = TranslatedSegment(styled=styled[i], translation=translation, tgt_lang=tgt)
         return [r for r in results if r is not None]
 

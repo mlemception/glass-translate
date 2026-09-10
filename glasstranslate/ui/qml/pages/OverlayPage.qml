@@ -5,9 +5,10 @@ import ".."
 
 /*!
     OverlayPage (docs/GLASS_DESIGN.md §2.3): card "Glass" (background opacity
-    slider previewing live, font, hide original) and card "Typesetting" (manga
-    mode, uppercase - disabled while manga mode is off); hints are the old
-    tooltips.
+    slider previewing live, font, hide original), card "Typesetting" (manga
+    mode, uppercase - disabled while manga mode is off) and card "Misc"
+    (capture mode: the glass becomes visible to screenshot tools while the
+    pipeline is frozen; runtime only, never saved); hints are the old tooltips.
 */
 // qmllint disable unqualified
 Flickable {
@@ -89,6 +90,21 @@ Flickable {
                     enabled: bridge.mangaMode
                     Binding on checked { value: bridge.uppercase }
                     onToggled: bridge.uppercase = uppercase.checked
+                }
+            }
+        }
+
+        GlassCard {
+            title: "Misc"
+            FormRow {
+                label: "Capture mode"
+                hint: "Let screenshot and screen-capture tools see the glass. The pipeline is frozen while this is on so the glass cannot read its own lettering; it is never saved and starts off every session."
+                GlassToggle {
+                    id: captureMode
+                    objectName: "captureModeToggle"
+                    text: "Show the glass to screen capture"
+                    Binding on checked { value: bridge.overlayCaptureMode }
+                    onToggled: bridge.overlayCaptureMode = captureMode.checked
                 }
             }
         }

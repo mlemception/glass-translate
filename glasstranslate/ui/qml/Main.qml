@@ -65,10 +65,12 @@ Item {
     // Sized from bridge.backdropSize (logical = physical / dpr): Qt Quick ignores the
     // devicePixelRatio of image-provider images, so the Image's implicit size is the
     // physical texture size and would magnify the backdrop at 125 % / 150 % scaling.
+    // backdropShift keeps a frame grabbed before the last move desktop-aligned (F2-1);
+    // the blur chain below is anchored to this item, so the whole stack shifts together.
     Item {
         id: backdropLayer
-        x: bridge.backdropOrigin.x
-        y: bridge.backdropOrigin.y
+        x: bridge.backdropOrigin.x + bridge.backdropShift.x
+        y: bridge.backdropOrigin.y + bridge.backdropShift.y
         width: bridge.backdropSize.width > 8 ? bridge.backdropSize.width : root.width + 64
         height: bridge.backdropSize.height > 8 ? bridge.backdropSize.height : root.height + 64
         Image {
