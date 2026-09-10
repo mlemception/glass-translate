@@ -31,7 +31,6 @@ exception: errors are reported through ``on_status`` and the loop retries.
 """
 from __future__ import annotations
 
-import inspect
 import logging
 import threading
 import time
@@ -45,13 +44,34 @@ from ..config.settings import AppConfig
 from ..translate.cache import TranslationCache
 from .interfaces import LanguageDetector, OCREngine, ScreenCapture, Translator
 from .types import Frame, PipelineStats, Rect, Segment, SegmentStyle, StyledSegment, TranslatedSegment
+from .engines import (  # noqa: F401 - re-exported for the tests
+    StatusCallback,
+    _accepts_status,
+    _default_capture_factory,
+    _default_detector_factory,
+    _default_ocr_factory,
+    _default_translator_factory,
+    _OCR_FIELDS,
+    _TRANSLATOR_FIELDS,
+    _DETECTOR_FIELDS,
+    _LANGUAGE_FIELDS,
+    _LAYOUT_FIELDS,
+    _CONTEXT_FIELDS,
+)
+from .segments import (  # noqa: F401 - re-exported for the tests
+    clean_translation,
+    _footprint,
+    _offset_translated,
+    _expand,
+    _merge_rects,
+    _offset_segment,
+)
 
 __all__ = ["Pipeline", "ResultCallback", "StatusCallback"]
 
 log = logging.getLogger(__name__)
 
 ResultCallback = Callable[[List[TranslatedSegment], PipelineStats], None]
-StatusCallback = Callable[[str], None]
 
 # Dirty rectangles are grown by this many frame pixels before OCR so text that
 # straddles a tile boundary is recognised whole.
@@ -81,149 +101,6 @@ _SCRIPT_LANGUAGES = frozenset({"ja", "ko", "zh", "ru", "ar", "el", "th", "he"})
 _FALLBACK_SRC = "en"
 # OCR engine whose plain-mode output goes through ``ocr.furigana.strip_furigana``.
 _FURIGANA_FILTERED_ENGINE = "paddleocr"
-
-# Config fields whose change requires rebuilding an engine.
-# ``models_dir`` is where the manga-ocr models live, so moving it rebuilds the
-# OCR chain as well as the translator.
-_OCR_FIELDS = ("ocr_engine", "ocr_device", "min_confidence", "models_dir")
-_TRANSLATOR_FIELDS = (
-    "translation_backend",
-    "translation_api_key",
-    "translation_api_url",
-    "translate_device",
-    "models_dir",
-    "gemini_model",
-    "gemini_api_format",
-    "gemini_base_url",
-    "gemini_timeout_s",
-    "gemini_max_retries",
-)
-_DETECTOR_FIELDS = ("tile_size", "change_threshold")
-_LANGUAGE_FIELDS = ("source_lang", "target_lang")
-_LAYOUT_FIELDS = ("manga_mode",)
-# Series context: pushed to the translator without rebuilding it; the cache key carries the
-# translator's context digest, so a change only invalidates the live segments.
-_CONTEXT_FIELDS = ("series_name", "series_prompt_template")
-
-
-def _default_capture_factory(cfg: AppConfig) -> ScreenCapture:
-    from ..capture import create_capture
-
-    return create_capture()
-
-
-def _default_ocr_factory(cfg: AppConfig, status: Optional[StatusCallback] = None) -> OCREngine:
-    """Build the configured OCR engine; ``status`` receives the fallback
-    chain's transition lines ("OCR: mangaocr failed ...; using paddleocr")."""
-    from ..ocr import create_ocr
-
-    return create_ocr(
-        cfg.ocr_engine, cfg.ocr_device, cfg.min_confidence, models_dir=cfg.models_dir, status=status
-    )
-
-
-def _accepts_status(factory: Callable[..., object]) -> bool:
-    """True when ``factory(cfg, status=...)`` is a valid call (see
-    ``_default_ocr_factory``); injected test factories usually take ``cfg`` only."""
-    try:
-        inspect.signature(factory).bind(None, status=None)
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
-def _default_translator_factory(cfg: AppConfig) -> Translator:
-    from ..translate import create_translator
-
-    return create_translator(cfg)
-
-
-def _default_detector_factory() -> LanguageDetector:
-    from ..ocr import ScriptLanguageDetector
-
-    return ScriptLanguageDetector()
-
-
-_UNK_MARKERS = ("<unk>", "⁇")  # sentencepiece / ctranslate2 unknown-token renderings
-
-
-def clean_translation(text: str) -> str:
-    """Drop unknown-token markers a model emits for words it has no
-    vocabulary for, and collapse the whitespace left behind.  Returns an empty
-    string when nothing but markers and punctuation remains, so the caller
-    can fall back to the source text instead of typesetting ``⁇``."""
-    cleaned = text
-    for marker in _UNK_MARKERS:
-        cleaned = cleaned.replace(marker, " ")
-    cleaned = " ".join(cleaned.split())
-    if not cleaned.strip(" .…,!?"):
-        return ""
-    return cleaned
-
-
-def _footprint(seg: TranslatedSegment) -> Rect:
-    """The frame area a live segment depends on: its quad plus, for typeset
-    blocks, the layout region (the whole bubble) and the erased patch painted
-    under the lettering.  A crop that re-reads the block must cover all of it
-    so the bubble is flood-filled whole.
-
-    Free text may be lettered anywhere inside ``style.search_box`` (up to a
-    few em from the source), i.e. possibly outside this footprint, so a
-    change under the lettering but outside the footprint does not re-read the
-    block.  That is cosmetic only (the glass is excluded from capture, so the
-    lettering never feeds back into OCR) and the search box is far too large
-    to serve as a crop trigger, so it is deliberately left out."""
-    box = seg.styled.segment.bbox
-    for extra in (seg.style.layout_box, seg.style.clean_rect):
-        if extra is not None:
-            box = box.union(extra)
-    return box
-
-
-def _offset_translated(seg: TranslatedSegment, dx: int, dy: int) -> TranslatedSegment:
-    """Copy of ``seg`` with every frame coordinate (quad and style) moved."""
-    inner = seg.styled.segment
-    moved = Segment(
-        inner.text, inner.quad + np.array([dx, dy], dtype=np.float32), inner.confidence, inner.lang_hint
-    )
-    return TranslatedSegment(
-        styled=StyledSegment(moved, seg.styled.style.shifted(dx, dy), seg.styled.src_lang),
-        translation=seg.translation,
-        tgt_lang=seg.tgt_lang,
-        from_cache=seg.from_cache,
-    )
-
-
-def _expand(rect: Rect, px: int, width: int, height: int) -> Rect:
-    """Grow ``rect`` by ``px`` on every side and clamp to ``width x height``."""
-    return Rect(rect.x - px, rect.y - px, rect.w + 2 * px, rect.h + 2 * px).clamp(width, height)
-
-
-def _merge_rects(rects: Sequence[Rect]) -> List[Rect]:
-    """Union intersecting rectangles until none intersect (order-independent)."""
-    merged = [r for r in rects if r.w > 0 and r.h > 0]
-    changed = True
-    while changed:
-        changed = False
-        out: List[Rect] = []
-        for r in merged:
-            for i, o in enumerate(out):
-                if r.intersects(o):
-                    out[i] = o.union(r)
-                    changed = True
-                    break
-            else:
-                out.append(r)
-        merged = out
-    return merged
-
-
-def _offset_segment(seg: Segment, dx: int, dy: int) -> Segment:
-    """Copy of an OCR ``seg`` moved from crop to frame coordinates."""
-    quad = seg.quad.copy()
-    quad[:, 0] += dx
-    quad[:, 1] += dy
-    return Segment(text=seg.text, quad=quad, confidence=seg.confidence, lang_hint=seg.lang_hint)
 
 
 @dataclass

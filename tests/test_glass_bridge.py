@@ -2,6 +2,8 @@
 (docs/GLASS_DESIGN.md section 7).  Headless: no window is created."""
 from __future__ import annotations
 
+import sys
+
 import json
 import time
 from pathlib import Path
@@ -14,6 +16,7 @@ from PySide6.QtGui import QImage
 from glasstranslate.config.settings import AppConfig
 from glasstranslate.core.types import PipelineStats, Rect
 from glasstranslate.ui import control as C
+from glasstranslate.ui import control_bridge as CB
 from glasstranslate.ui.glass.appearance import Appearance, AppearanceSignals
 from glasstranslate.ui.glass.backdrop import POLARITY_HIGH, POLARITY_LOW, BackdropFrame, InkPolarity
 
@@ -258,7 +261,7 @@ def test_translate_devices_frozen_rule(tmp_path: Path, monkeypatch: pytest.Monke
     frozen_cuda = C.translate_device_items("cuda", frozen=True)
     assert [i["value"] for i in frozen_cuda] == ["auto", "cpu", "cuda"]
     assert frozen_cuda[-1]["hint"] == C.CUDA_FROZEN_HINT
-    monkeypatch.setattr(C.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     bridge, cfg, _ = _bridge(tmp_path, AppConfig(translate_device="cuda"))
     assert [i["value"] for i in bridge.translateDevices] == ["auto", "cpu", "cuda"]
     assert bridge.translateDeviceHint == C.CUDA_FROZEN_HINT and bridge.frozen is True
@@ -325,7 +328,7 @@ class _FakeWorker(QObject):
 
 def test_manga_ocr_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """F3: the Engines page can fetch the manga-ocr ONNX bundle through the same progress row."""
-    monkeypatch.setattr(C, "MangaOcrDownloadWorker", _FakeWorker)
+    monkeypatch.setattr(CB, "MangaOcrDownloadWorker", _FakeWorker)
     _FakeWorker.instances.clear()
     bridge, cfg, _ = _bridge(tmp_path, AppConfig(models_dir=str(tmp_path / "m")))
     models_changed: List[int] = []
@@ -348,7 +351,7 @@ def test_manga_ocr_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(C, "ModelDownloadWorker", _FakeWorker)
+    monkeypatch.setattr(CB, "ModelDownloadWorker", _FakeWorker)
     _FakeWorker.instances.clear()
     bridge, cfg, _ = _bridge(tmp_path, AppConfig(source_lang="auto", target_lang="en"))
     models: List[int] = []

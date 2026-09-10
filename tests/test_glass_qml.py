@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import pytest
-from PySide6.QtCore import QObject, QUrl
+from PySide6.QtCore import Qt, QObject, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtQml import QQmlComponent, QQmlExpression, qmlContext
 from PySide6.QtQuick import QQuickItem, QQuickView
@@ -66,7 +66,7 @@ def test_window_loads_clean(window: C.ControlWindow) -> None:
     assert window.errors() == []
     assert window.qml_warnings == []
     assert window.rootObject() is not None
-    assert window.flags() & C.Qt.WindowType.FramelessWindowHint
+    assert window.flags() & Qt.WindowType.FramelessWindowHint
     assert window.minimumSize().width() == 832 and window.minimumSize().height() == 640
     assert window.size().width() == 832 and window.size().height() == 640
     assert window.rootContext().contextProperty("bridge") is window.bridge
@@ -110,7 +110,7 @@ def test_window_is_fixed_size(window: C.ControlWindow) -> None:
 def test_start_resize_does_not_start_a_system_resize(window: C.ControlWindow, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[int] = []
     monkeypatch.setattr(window, "startSystemResize", lambda edges: calls.append(edges))
-    window.bridge.startResize(int(C.Qt.Edge.LeftEdge.value))
+    window.bridge.startResize(int(Qt.Edge.LeftEdge.value))
     assert calls == []
 
 

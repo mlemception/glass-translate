@@ -128,9 +128,10 @@ def test_control_window_frame_hook_records_offset(profiling_on, tmp_path: Path, 
     """The real hook: ``_on_backdrop_frame`` records the frame vs the window's current rect."""
     from glasstranslate.config.settings import AppConfig
     from glasstranslate.ui import control as C
+    from glasstranslate.ui.glass import win32
 
     prof = profiling_on
-    monkeypatch.setattr(C.win32, "physical_rect", lambda _w: Rect(140, 100, 832, 640))
+    monkeypatch.setattr(win32, "physical_rect", lambda _w: Rect(140, 100, 832, 640))
     w = C.ControlWindow(AppConfig(), tmp_path / "c.json")
     try:
         assert hasattr(w, "_profile_hooks")
