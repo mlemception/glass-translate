@@ -1,8 +1,8 @@
 # Feature batch plan — 2026-09-09
 
 Five features as thin vertical slices, each independently testable, TDD-driven, ~one commit.
-Baseline: 297 tests green (commit 12f3242). Status: **implemented 2026-09-10, awaiting GATE 2**
-(603 tests green, nothing committed; see `progress.md` session 5 for the hand-off).
+Baseline: 297 tests green (commit 12f3242). Status: **committed 2026-09-10 at GATE 2**
+(`19ca771` feat + `7d837b1` docs, 603 tests green; see `progress.md` session 5 for the hand-off).
 
 Features: (F1) overlay capture mode, (F2) liquid-glass performance, (F3) OCR pipeline
 (manga-ocr primary / PaddleOCR-family fallback), (F4) Gemini translation provider,
