@@ -227,12 +227,13 @@ Flickable {
             visible: bridge.backendGemini
             FormRow {
                 label: "Model"
-                hint: "Flash models are fast and cheap; 3.8 Flash is the quality default."
-                GlassComboBox {
-                    objectName: "geminiModelCombo"
-                    model: bridge.geminiModels
-                    value: bridge.geminiModel
-                    onSelected: function (v) { bridge.geminiModel = v }
+                hint: "Any model id your endpoint serves (presets: " + bridge.geminiModelPresets + "); 3.8 Flash is the quality default."
+                GlassTextField {
+                    id: geminiModelField
+                    objectName: "geminiModelField"
+                    placeholder: bridge.geminiModelDefault
+                    Binding on text { value: bridge.geminiModel }
+                    onCommitted: function (t) { bridge.geminiModel = t; geminiModelField.text = bridge.geminiModel }
                 }
             }
             FormRow {

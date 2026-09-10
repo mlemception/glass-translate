@@ -21,6 +21,7 @@ import random
 import re
 import threading
 import time
+from urllib.parse import quote
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import requests
@@ -422,7 +423,8 @@ class GeminiTranslator(Translator):
         return self._native_request(system, prompt)
 
     def _native_request(self, system: str, prompt: str) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
-        url = "%s/v1beta/models/%s:generateContent" % (self._base_url, self._model)
+        # the model id is user-editable free text: keep it inside one path segment
+        url = "%s/v1beta/models/%s:generateContent" % (self._base_url, quote(self._model, safe=""))
         headers = {"x-goog-api-key": self._api_key, "Content-Type": "application/json"}
         thinking = _thinking_config(self._model, self._thinking_level)
         generation = {

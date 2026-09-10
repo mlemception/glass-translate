@@ -171,6 +171,16 @@ def test_api_key_sent_as_header_not_in_url():
     assert call.headers["Content-Type"] == "application/json"
 
 
+def test_model_id_is_url_quoted_into_one_path_segment():
+    """The Model field is free text since 2026-09-10: a slash, space or query char must not escape
+    the models/<id>:generateContent path segment."""
+    tr, session, _ = make([native_ok("1. Hi")], model="team/model x?k=v")
+    tr.translate_batch([JA_HELLO], "ja", "en")
+    url = session.calls[0].url
+    assert url.endswith("/v1beta/models/team%2Fmodel%20x%3Fk%3Dv:generateContent")
+    assert "/team/" not in url and "?" not in url
+
+
 def test_response_with_fewer_lines_keeps_source_for_missing():
     tr, _, _ = make([native_ok("1. A\n3. C")])
     out = tr.translate_batch(["a", "b", "c"], "ja", "en")

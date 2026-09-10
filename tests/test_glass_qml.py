@@ -252,7 +252,9 @@ def test_engines_page_gemini_card_follows_backend(window: C.ControlWindow, qapp)
     assert _qml_value(key, "password") is True
     assert _qml_value(key, "echoMode") == 2  # TextInput.Password
     assert _qml_value(key, "text") == ""  # the stored key is never redisplayed
-    assert _qml_value(root.findChild(QQuickItem, "geminiModelCombo"), "value") == "gemini-3.8-flash"
+    model_field = root.findChild(QQuickItem, "geminiModelField")
+    assert _qml_value(model_field, "text") == "gemini-3.8-flash"  # free text: any id the endpoint serves
+    assert _qml_value(model_field, "placeholder") == "gemini-3.8-flash"
 
 
 def test_translate_page_has_series_field_and_engines_page_template_editor(window: C.ControlWindow, qapp) -> None:

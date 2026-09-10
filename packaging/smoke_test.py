@@ -14,6 +14,9 @@ Runs (``--runs`` selects; default ``static,A,B,C``):
                screenshot statistics (numpy) exactly as section 6 lists them.
 * ``B``      - config ``running_on_start=true``, ``translation_backend="identity"``, AUTOEXIT 20000:
                the OCR engine constructs inside the frozen tree (``status_history``).
+* ``D``      - (opt-in) clean ``%LOCALAPPDATA%`` + ``GLASSTRANSLATE_SMOKE_ACTIONS=downloadMangaOcr``: paddleocr
+               fallback first, the manga-ocr bundle (~200 MB) downloads into the clean profile, the pipeline
+               comes back on manga-ocr; the app reports and quits by itself when the download ends.
 * ``C``      - onefile lifecycle: launch with AUTOEXIT 60000, wait for the report, ``taskkill /F``, then
                launch run A again and assert the stale ``_MEI*`` directory was swept by ``run.py``.
 
@@ -45,6 +48,7 @@ FORBIDDEN_ENV_PREFIXES = ("PYTHON", "QT_", "VIRTUAL_ENV", "QML", "QSG_")
 AUTOEXIT_A_MS = 8000
 AUTOEXIT_B_MS = 20000
 AUTOEXIT_C_MS = 60000
+AUTOEXIT_D_MS = 600000  # cap for the ~200 MB manga-ocr download; the app quits itself once it is done
 LAUNCH_GRACE_S = 90.0  # extra wall time allowed beyond AUTOEXIT before a run is declared hung
 
 # Slab geometry (logical px): window = slab + 72 wide / + 80 tall; slab inset left/right 36, top 28, bottom 52.
@@ -428,6 +432,7 @@ def _report_checks_a(run: str, lau: Launch, res: Results) -> None:
     ro = rep.get("resources_ok") or {}
     res.add(run, "resources_ok all true", bool(ro) and all(bool(v) for v in ro.values()), str(ro))
     res.add(run, "fonts_ok (Anime Ace 2.0 BB)", bool(rep.get("fonts_ok")))
+    res.add(run, "ssl_ok (CPython OpenSSL DLLs in the tree, https possible)", rep.get("ssl_ok") is True, str(rep.get("ssl_ok")))
     _screenshot_checks(run, rep, res)
 
 
@@ -476,6 +481,53 @@ def _secret_leak_checks(tag: str, rep: Dict[str, Any], res: Results) -> None:
     res.add(tag, "report contains no secret markers", not hits, ", ".join(hits))
 
 
+def run_d(sb: Sandbox, res: Results, mechanics: bool) -> Launch:
+    """First run on a CLEAN ``%LOCALAPPDATA%``: manga-ocr models missing -> paddleocr fallback, then the
+    Engines-page download (driven through ``GLASSTRANSLATE_SMOKE_ACTIONS``) installs the bundle under
+    the clean profile and the pipeline comes back on manga-ocr.  Opt-in (``--runs D``): ~200 MB fetch."""
+    clean = sb.dir / "localappdata"
+    clean.mkdir(exist_ok=True)
+    sb.write_config({"running_on_start": True, "translation_backend": "identity"})
+    lau = sb.launch("D", AUTOEXIT_D_MS, {"LOCALAPPDATA": str(clean), "GLASSTRANSLATE_SMOKE_ACTIONS": "downloadMangaOcr"})
+    res.add("D", "exe exits 0 from the bare folder", lau.returncode == 0 and not lau.killed,
+            f"{_rc_text(lau.returncode)} wall={lau.wall_s:.1f}s {lau.error}".strip())
+    res.add("D", "_MEI removed after normal exit", not lau.mei_left, ", ".join(lau.mei_left) or "clean")
+    log_file = clean / "GlassTranslate" / "logs" / "glasstranslate.log"
+    res.add("D", "log file written under the clean %LOCALAPPDATA%", log_file.exists(), str(log_file))
+    rep = lau.report
+    if rep is None:
+        res.add("D", "smoke report written", False, f"{lau.report_path.name} missing {lau.error}".strip())
+        return lau
+    if mechanics:
+        res.info["report_D"] = "present"
+        return lau
+    hist = [str(s) for s in rep.get("status_history") or []]
+    res.add("D", "paddleocr fallback while the manga-ocr models are missing",
+            any(s.startswith("OCR: mangaocr failed") and "using paddleocr" in s for s in hist),
+            next((s for s in hist if s.startswith("OCR: ")), f"{hist[:3]}"))
+    act = (rep.get("actions") or {}).get("downloadMangaOcr") or {}
+    res.add("D", "download action finished (progress row reached 100)", bool(act.get("finished")) and act.get("progress") == 100,
+            f"{act.get('seconds')} s, {act.get('label')!r}, progress {act.get('progress')}")
+    res.add("D", "models_ready False -> True under the clean %LOCALAPPDATA%",
+            act.get("models_ready_before") is False and act.get("models_ready_after") is True
+            and str(clean).lower() in str(act.get("models_dir", "")).lower(),
+            f"{act.get('models_dir')} before={act.get('models_ready_before')} after={act.get('models_ready_after')}")
+    res.add("D", 'status "manga-ocr models installed at ..."', any(s.startswith("manga-ocr models installed at") for s in hist),
+            next((s for s in hist if s.startswith("manga-ocr models")), "missing")[:160])
+    i_fallback = next((i for i, s in enumerate(hist) if s.startswith("OCR: mangaocr failed")), -1)
+    after = hist[i_fallback + 1:]
+    # The fallback chain re-probes the primary every retry_after_s and reports "restored" once the bundle
+    # is in place (a full engine rebuild would say "OCR: mangaocr on <device>" instead; both prove it).
+    back = ("OCR: mangaocr restored", "OCR: mangaocr on")
+    res.add("D", 'chain back on manga-ocr ("OCR: mangaocr restored" / "... on") after the download',
+            any(s.startswith(back) for s in after),
+            next((s for s in after if s.startswith(back)), f"{hist[-3:]}"))
+    bad = [s for s in hist if s.startswith(("Engine error", "Error:", "Download failed"))]
+    res.add("D", 'no "Engine error"/"Error:"/"Download failed" status', not bad, "; ".join(bad)[:200])
+    _secret_leak_checks("D", rep, res)
+    return lau
+
+
 def run_c(sb: Sandbox, res: Results, mechanics: bool) -> None:
     sb.write_config({})
     kill_when = "after_mei" if mechanics else "report"
@@ -509,7 +561,8 @@ def print_table(res: Results) -> None:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Smoke-test dist/GlassTranslate.exe from a bare external folder.")
     p.add_argument("--exe", type=Path, default=DEFAULT_EXE)
-    p.add_argument("--runs", default="static,A,B,C", help="comma list of static,A,B,C (default all)")
+    p.add_argument("--runs", default="static,A,B,C",
+                   help="comma list of static,A,B,C,D (default static,A,B,C; D = clean-profile manga-ocr download, ~200 MB)")
     p.add_argument("--mechanics", action="store_true",
                    help="only launch/exit/_MEI/log/lifecycle checks (no smoke-report assertions)")
     p.add_argument("--keep", action="store_true", help="keep the temp folder")
@@ -532,7 +585,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if "static" in runs:
         static_checks(exe, res)
     sb: Optional[Sandbox] = None
-    if any(r in runs for r in ("A", "B", "C")):
+    if any(r in runs for r in ("A", "B", "C", "D")):
         sb = Sandbox(exe)
         print(f"sandbox: {sb.dir}\nPATH: {sb.base_env['PATH']}")
         try:
@@ -542,6 +595,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 run_b(sb, res, args.mechanics)
             if "C" in runs:
                 run_c(sb, res, args.mechanics)
+            if "D" in runs:
+                run_d(sb, res, args.mechanics)
         finally:
             if args.keep:
                 print(f"kept: {sb.dir}")

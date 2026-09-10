@@ -17,11 +17,13 @@ app is frozen, and Qt's own messages are routed to the ``qt`` logger.
 from __future__ import annotations
 
 import gc
+import importlib
 import json
 import logging
 import logging.handlers
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -55,6 +57,10 @@ LOG_MAX_BYTES = 2_000_000
 LOG_BACKUP_COUNT = 3
 SMOKE_GRAB_LEAD_MS = 1500  # screenshot this long before the autoexit
 SMOKE_PAGES_LEAD_MS = 3000  # tab walk this long before the autoexit
+SMOKE_ACTIONS_ENV = "GLASSTRANSLATE_SMOKE_ACTIONS"  # comma list of whitelisted bridge slots to drive
+SMOKE_ACTION_DELAY_MS = 1500  # run the actions this long after start (window exposed, pipeline up)
+SMOKE_ACTION_SETTLE_MS = 8000  # after the last action: let the pipeline rebuild its engines, then report + quit
+_SMOKE_ACTIONS = ("downloadMangaOcr",)  # the only bridge slots the environment may drive
 MANGA_FONT_FAMILY = "Anime Ace 2.0 BB"
 PAGE_NAMES = ("TranslatePage", "OverlayPage", "EnginesPage", "HotkeysPage")
 _SHADER_STATUS_COMPILED, _SHADER_STATUS_UNCOMPILED, _SHADER_STATUS_ERROR = 0, 1, 2
@@ -357,6 +363,15 @@ def _shader_effects(control: QQuickView) -> Dict[str, Any]:
     return {"total": total, "compiled": compiled, "error": error, "logs": logs}
 
 
+def _ssl_available() -> bool:
+    """``import ssl`` works in this tree (the frozen exe must carry CPython's OpenSSL DLLs for any https)."""
+    try:
+        importlib.import_module("ssl")
+    except ImportError:
+        return False
+    return True
+
+
 def _rhi_backend(control: QQuickView) -> str:
     try:
         api = control.rendererInterface().graphicsApi()
@@ -445,6 +460,64 @@ class SmokeReport(QObject):
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.write_if_needed)
+        # Whitelisted UI actions driven from the environment (smoke run D drives the manga-ocr
+        # download this way on a clean %LOCALAPPDATA%); the report carries their outcome.
+        self._actions: Dict[str, Dict[str, Any]] = {}
+        self._action_t0 = 0.0
+        self._pending_actions: List[str] = []
+        for name in (n.strip() for n in os.environ.get(SMOKE_ACTIONS_ENV, "").split(",")):
+            if not name:
+                continue
+            if name in _SMOKE_ACTIONS:
+                if name not in self._pending_actions:
+                    self._pending_actions.append(name)
+            else:
+                log.warning("smoke: ignoring unknown action %r", name)
+        if self._pending_actions:
+            QTimer.singleShot(SMOKE_ACTION_DELAY_MS, self._run_actions)
+
+    @Slot()
+    def _run_actions(self) -> None:
+        """Drive the whitelisted bridge slots requested through ``GLASSTRANSLATE_SMOKE_ACTIONS``."""
+        from ..ocr.models import models_ready
+
+        bridge = self.session.control.bridge
+        for name in self._pending_actions:
+            if name == "downloadMangaOcr":
+                models_dir = str(bridge.modelsDir)
+                self._actions[name] = {
+                    "started": True, "finished": False, "seconds": None, "label": "", "progress": -1,
+                    "models_dir": models_dir, "models_ready_before": models_ready(models_dir),
+                    "models_ready_after": None,
+                }
+                self._action_t0 = time.perf_counter()
+                bridge.downloadChanged.connect(self._on_action_download_changed)
+                bridge.downloadMangaOcr()
+        self._pending_actions = []
+
+    @Slot()
+    def _on_action_download_changed(self) -> None:
+        from ..ocr.models import models_ready
+
+        bridge = self.session.control.bridge
+        record = self._actions.get("downloadMangaOcr")
+        if record is None or record["finished"]:
+            return
+        record["label"] = str(bridge.downloadLabel)
+        record["progress"] = int(bridge.downloadProgress)
+        if not bridge.downloadActive:
+            record["finished"] = True
+            record["seconds"] = round(time.perf_counter() - self._action_t0, 1)
+            record["models_ready_after"] = models_ready(record["models_dir"])
+            QTimer.singleShot(SMOKE_ACTION_SETTLE_MS, self._finish_after_actions)
+
+    @Slot()
+    def _finish_after_actions(self) -> None:
+        """Report and quit as soon as the actions are done instead of waiting for the autoexit."""
+        self._grab_and_write()
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.quit()
 
     @Slot()
     def _on_frame(self) -> None:
@@ -517,6 +590,7 @@ class SmokeReport(QObject):
             "backdrop_luma": float(bridge.backdropLuma),
             "ink_polarity": int(bridge.inkPolarity),
             "fonts_ok": MANGA_FONT_FAMILY in QFontDatabase.families(),
+            "ssl_ok": _ssl_available(),
             "resources_ok": {
                 "qml": QFile.exists(":/qml/Main.qml"),
                 "shaders": all(QFile.exists(f":/qml/shaders/{n}.frag.qsb") for n in ("glass", "blur", "shadow")),
@@ -529,9 +603,13 @@ class SmokeReport(QObject):
             "pages_detail": pages_detail,
             "dpi_awareness": win32.dpi_awareness(),
             "status_history": list(control.status_history),
+            # last pipeline stats as shown on the status strip (proof that passes produced output)
+            "stats": {name: str(getattr(bridge.stats, name, "")) for name in
+                      ("totalText", "fpsText", "stagesText", "segmentsText", "cacheText", "devicesText")},
             "dpr": dpr,
             "window": {"x": geom.x(), "y": geom.y(), "w": geom.width(), "h": geom.height(), "dpr": dpr},
             "frames_swapped": self._frames,
+            "actions": self._actions,
             "screenshot": str(screenshot.resolve()) if screenshot is not None else None,
         }
 
