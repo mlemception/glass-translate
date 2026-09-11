@@ -214,6 +214,60 @@ def test_plain_mode_keeps_every_line_for_other_engines() -> None:
     assert len(results[-1][0]) == 3
 
 
+def test_replace_capture_swaps_the_source_without_rebuilding_the_other_engines() -> None:
+    """The feedPage smoke action swaps screen capture for a still page *inside* the running
+    worker: restarting it would leave two engine loads racing (an onnxruntime-DirectML
+    access violation), so only the capture is rebuilt and the page is re-read in full."""
+    first, second = np.full((H, W, 3), 255, np.uint8), np.full((H, W, 3), 200, np.uint8)
+    captures: List[FakeCapture] = []
+    ocr_calls: List[int] = []
+    translator_calls: List[int] = []
+
+    def make_ocr(cfg: AppConfig) -> OCREngine:
+        ocr_calls.append(1)
+        return NamedOCR("mangaocr", [Segment("あ", rect_quad(10, 10, 40, 20), 0.9)])
+
+    def make_translator(cfg: AppConfig) -> Translator:
+        translator_calls.append(1)
+        return EchoTranslator()
+
+    def make_capture(image: np.ndarray):
+        def factory(cfg: AppConfig) -> ScreenCapture:
+            capture = FakeCapture(image)
+            captures.append(capture)
+            return capture
+
+        return factory
+
+    results: list = []
+    pipe = P.Pipeline(
+        AppConfig(translation_backend="identity", source_lang="ja", target_lang="en", manga_mode=False),
+        region_provider=lambda: Rect(0, 0, W, H),
+        on_result=lambda segments, stats: results.append((segments, stats)),
+        on_status=lambda m: None,
+        capture_factory=make_capture(first),
+        ocr_factory=make_ocr,
+        translator_factory=make_translator,
+        detector_factory=JaDetector,
+    )
+    pipe.step()
+    assert len(captures) == 1 and captures[0].image is first
+    assert ocr_calls == [1] and translator_calls == [1]
+    detector = pipe._change_detector
+
+    pipe.replace_capture(make_capture(second))
+    pipe.step()
+
+    assert len(captures) == 2 and captures[1].image is second  # a fresh capture off the new factory
+    assert ocr_calls == [1] and translator_calls == [1]  # ...and nothing else was rebuilt
+    assert pipe._change_detector is detector
+    assert pipe._pending_capture is None  # consumed exactly once
+    assert results[-1][1].skipped_unchanged is False  # the new source was read whole, not diffed away
+
+    pipe.step()  # the same page again: back to the cheap unchanged path
+    assert len(captures) == 2 and results[-1][1].skipped_unchanged is True
+
+
 def test_manga_mode_grouping_is_unchanged_by_the_plain_filter() -> None:
     """Manga mode keeps its own furigana rule in render/layout.py: the block
     still absorbs the ruby line instead of translating it separately."""

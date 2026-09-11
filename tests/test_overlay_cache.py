@@ -95,6 +95,27 @@ def test_an_upgraded_patch_is_reconverted_and_the_lettering_is_kept(app):
     assert QColor(glass._patches[0].pixel(5, 5)).blue() == 17
 
 
+def test_patch_counters_count_conversions_and_upgrades(app):
+    """``patch_stats`` feeds the smoke report: how often a clean patch was converted to a
+    QImage and how often that replaced a cached image of the same block (a sidecar upgrade)."""
+    glass = O.GlassOverlay()
+    assert glass.patch_stats == {"conversions": 0, "upgrades": 0}
+    a, b = _block_segment("HELLO THERE FRIEND", 60), _block_segment("ANOTHER ONE", 200)
+    glass._apply_segments([a, b])
+    assert glass.patch_stats == {"conversions": 2, "upgrades": 0}
+    # A pass that changed nothing re-uses both images.
+    glass._apply_segments([a, b])
+    assert glass.patch_stats == {"conversions": 2, "upgrades": 0}
+    # A sidecar result for one block: one re-conversion of an already cached segment.
+    a.style.clean_patch = np.full_like(a.style.clean_patch, 9)
+    a.style.clean_patch_serial += 1
+    glass._apply_segments([a, b])
+    assert glass.patch_stats == {"conversions": 3, "upgrades": 1}
+    # A brand new segment object is converted, but replacing nothing is not an upgrade.
+    glass._apply_segments([_block_segment("HELLO THERE FRIEND", 60), b])
+    assert glass.patch_stats == {"conversions": 4, "upgrades": 1}
+
+
 def test_layer_blit_matches_direct_stroking(app):
     glass = O.GlassOverlay()
     seg = _block_segment("HELLO THERE FRIEND", 60)

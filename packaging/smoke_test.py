@@ -19,6 +19,9 @@ Runs (``--runs`` selects; default ``static,A,B,C``):
                comes back on manga-ocr; the app reports and quits by itself when the download ends.
 * ``C``      - onefile lifecycle: launch with AUTOEXIT 60000, wait for the report, ``taskkill /F``, then
                launch run A again and assert the stale ``_MEI*`` directory was swept by ``run.py``.
+* ``portable`` - (on its own, see ``smoke_portable.py``) the offline bundle: both zips unpacked into a
+               space + non-ASCII path with decoy profile folders and dead proxies, the frozen sidecar,
+               the app's own portable paths, static/A/B/C from the unpacked root and a relocation.
 
 ``--mechanics`` (used by ``build.py --allow-incomplete``) checks only what does not need the new UI:
 static resources, launch + clean exit from the bare folder, ``_MEI`` extraction/cleanup, the log
@@ -87,9 +90,12 @@ class Launch:
 class Results:
     checks: List[Check] = field(default_factory=list)
     info: Dict[str, Any] = field(default_factory=dict)
+    # Prepended to every run label; the portable run sets it for its relocated second pass so
+    # the shared runs can be repeated without two rows claiming to be the same check.
+    prefix: str = ""
 
     def add(self, run: str, name: str, ok: bool, detail: str = "") -> bool:
-        self.checks.append(Check(run, name, bool(ok), detail))
+        self.checks.append(Check(self.prefix + run, name, bool(ok), detail))
         return bool(ok)
 
     @property
@@ -157,26 +163,61 @@ def static_checks(exe: Path, res: Results) -> None:
 
 
 # ------------------------------------------------------------------------------------------ sandbox
-class Sandbox:
-    """A fresh ``%TEMP%/gt_extest_*`` folder holding one copy of the exe and its config/report files."""
+_OWN_CONFIG = object()  # "a config.json in the sandbox folder" (the default)
 
-    def __init__(self, exe: Path) -> None:
-        self.dir = Path(tempfile.mkdtemp(prefix="gt_extest_"))
-        self.exe = self.dir / exe.name
-        shutil.copy2(exe, self.exe)
-        self.config = self.dir / "config.json"
-        self.base_env = self._make_env()
+
+class Sandbox:
+    """A folder the exe is launched from with a scrubbed environment.
+
+    By default a fresh ``%TEMP%/gt_extest_*`` holding one copy of the exe and its config /
+    report files - what runs static/A/B/C/D use.  The ``portable`` run passes an unpacked
+    bundle instead:
+
+    Args:
+        exe: the exe to run (copied into a fresh folder unless ``root`` is given).
+        root: an existing folder to run *in*; ``exe`` is then used where it lies.
+        temp: ``TEMP``/``TMP`` for the child and where ``_MEI`` and the reports are looked
+            for (default: the sandbox folder itself).
+        config: the config file the runs write; ``None`` = no config file at all.
+        config_env: set ``GLASSTRANSLATE_CONFIG`` to it (portable mode does not: the app's
+            own portable config path is what is under test).
+        config_defaults: merged *under* every :meth:`write_config` payload.
+        env_overlay: extra variables (proxies, decoy profile folders) applied last.
+        log_file: the app log a launch is expected to write (default: the one under the real
+            ``%LOCALAPPDATA%``).
+    """
+
+    def __init__(self, exe: Path, *, root: Optional[Path] = None, temp: Optional[Path] = None,
+                 config: Any = _OWN_CONFIG, config_env: bool = True,
+                 config_defaults: Optional[Dict[str, Any]] = None,
+                 env_overlay: Optional[Dict[str, str]] = None,
+                 log_file: Optional[Path] = None) -> None:
+        if root is None:
+            self.dir = Path(tempfile.mkdtemp(prefix="gt_extest_"))
+            self.exe = self.dir / exe.name
+            shutil.copy2(exe, self.exe)
+        else:
+            self.dir = Path(root)
+            self.exe = Path(exe)
+        self.temp = self.dir if temp is None else Path(temp)
+        self.temp.mkdir(parents=True, exist_ok=True)
+        self.config = self.dir / "config.json" if config is _OWN_CONFIG else (
+            None if config is None else Path(config))
+        self.config_env = bool(config_env)
+        self.config_defaults = dict(config_defaults or {})
+        self.log_file = LOG_FILE if log_file is None else Path(log_file)
+        self.base_env = self._make_env(dict(env_overlay or {}))
         self.last_killed_pids: List[int] = []
 
-    def _make_env(self) -> Dict[str, str]:
+    def _make_env(self, overlay: Dict[str, str]) -> Dict[str, str]:
         sysroot = os.environ.get("SystemRoot", r"C:\Windows")
         env = {
             "PATH": os.pathsep.join([sysroot + r"\System32", sysroot, sysroot + r"\System32\Wbem",
                                      sysroot + r"\System32\WindowsPowerShell\v1.0"]),
             "SystemRoot": sysroot,
             "SystemDrive": os.environ.get("SystemDrive", "C:"),
-            "TEMP": str(self.dir),
-            "TMP": str(self.dir),
+            "TEMP": str(self.temp),
+            "TMP": str(self.temp),
             "USERPROFILE": os.environ.get("USERPROFILE", ""),
             "APPDATA": os.environ.get("APPDATA", ""),
             "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
@@ -184,23 +225,27 @@ class Sandbox:
             "COMSPEC": sysroot + r"\System32\cmd.exe",
             "PATHEXT": ".COM;.EXE;.BAT;.CMD",
             "NUMBER_OF_PROCESSORS": os.environ.get("NUMBER_OF_PROCESSORS", "4"),
-            "GLASSTRANSLATE_CONFIG": str(self.config),
         }
+        if self.config is not None and self.config_env:
+            env["GLASSTRANSLATE_CONFIG"] = str(self.config)
+        env.update(overlay)
         for key in env:
             if key.upper().startswith(FORBIDDEN_ENV_PREFIXES):
                 raise RuntimeError(f"sandbox env leaks {key}")
         return env
 
     def write_config(self, overrides: Dict[str, Any]) -> None:
-        self.config.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
+        if self.config is None:
+            return
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text(json.dumps({**self.config_defaults, **overrides}, indent=2), encoding="utf-8")
 
     def mei_dirs(self) -> List[str]:
-        return sorted(d for d in os.listdir(self.dir) if d.upper().startswith("_MEI"))
+        return sorted(d for d in os.listdir(self.temp) if d.upper().startswith("_MEI"))
 
-    @staticmethod
-    def _log_state() -> Tuple[int, float]:
+    def _log_state(self) -> Tuple[int, float]:
         try:
-            st = LOG_FILE.stat()
+            st = self.log_file.stat()
             return st.st_size, st.st_mtime
         except OSError:
             return 0, 0.0
@@ -213,7 +258,7 @@ class Sandbox:
         smoke report appears (run C); ``"after_mei"`` kills it *mechanics_kill_delay_s* after the ``_MEI``
         dir shows up (run C without report support in the app).
         """
-        report_path = self.dir / f"smoke_{tag}.json"
+        report_path = self.temp / f"smoke_{tag}.json"
         if report_path.exists():
             report_path.unlink()
         env = dict(self.base_env)
@@ -351,8 +396,10 @@ class Sandbox:
 
 
 # --------------------------------------------------------------------------------------- assertions
-def _launch_mechanics(run: str, lau: Launch, res: Results, autoexit_ms: int, *, expect_exit: bool = True) -> None:
+def _launch_mechanics(run: str, lau: Launch, res: Results, autoexit_ms: int, *, expect_exit: bool = True,
+                      log_file: Optional[Path] = None) -> None:
     """Checks that hold for any frozen build: exit, extraction, cleanup, log file, cold start."""
+    log_path = LOG_FILE if log_file is None else Path(log_file)
     if expect_exit:
         res.add(run, "exe exits 0 from the bare folder", lau.returncode == 0 and not lau.killed,
                 f"{_rc_text(lau.returncode)} wall={lau.wall_s:.1f}s {lau.error}".strip())
@@ -360,13 +407,13 @@ def _launch_mechanics(run: str, lau: Launch, res: Results, autoexit_ms: int, *, 
     if expect_exit:
         res.add(run, "_MEI removed after normal exit", not lau.mei_left, ", ".join(lau.mei_left) or "clean")
         overhead = lau.wall_s - autoexit_ms / 1000
-        res.info.setdefault("cold_start_s", {})[run] = round(overhead, 2)
+        res.info.setdefault("cold_start_s", {})[res.prefix + run] = round(overhead, 2)
         res.add(run, "cold start recorded", True, f"~{overhead:.1f} s (wall {lau.wall_s:.1f} s - autoexit {autoexit_ms / 1000:.0f} s)")
     size_b, mtime_b = lau.log_before
     size_a, mtime_a = lau.log_after
-    written = LOG_FILE.exists() and (size_a != size_b or mtime_a > mtime_b)
-    res.add(run, "log file written under %LOCALAPPDATA%/GlassTranslate/logs", written,
-            f"{LOG_FILE} {size_b}->{size_a} bytes" if LOG_FILE.exists() else f"{LOG_FILE} missing")
+    written = log_path.exists() and (size_a != size_b or mtime_a > mtime_b)
+    res.add(run, "log file written under the app's logs directory", written,
+            f"{log_path} {size_b}->{size_a} bytes" if log_path.exists() else f"{log_path} missing")
 
 
 def _screenshot_checks(run: str, report: Dict[str, Any], res: Results) -> None:
@@ -439,7 +486,7 @@ def _report_checks_a(run: str, lau: Launch, res: Results) -> None:
 def run_a(sb: Sandbox, res: Results, mechanics: bool, tag: str = "A") -> Launch:
     sb.write_config({})
     lau = sb.launch(tag, AUTOEXIT_A_MS, {"GLASSTRANSLATE_APPEARANCE": "glass"})
-    _launch_mechanics(tag, lau, res, AUTOEXIT_A_MS)
+    _launch_mechanics(tag, lau, res, AUTOEXIT_A_MS, log_file=sb.log_file)
     if mechanics:
         res.info[f"report_{tag}"] = "present" if lau.report is not None else "absent"
     else:
@@ -450,7 +497,7 @@ def run_a(sb: Sandbox, res: Results, mechanics: bool, tag: str = "A") -> Launch:
 def run_b(sb: Sandbox, res: Results, mechanics: bool) -> Launch:
     sb.write_config({"running_on_start": True, "translation_backend": "identity"})
     lau = sb.launch("B", AUTOEXIT_B_MS)
-    _launch_mechanics("B", lau, res, AUTOEXIT_B_MS)
+    _launch_mechanics("B", lau, res, AUTOEXIT_B_MS, log_file=sb.log_file)
     if mechanics:
         res.info["report_B"] = "present" if lau.report is not None else "absent"
         return lau
@@ -562,23 +609,49 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Smoke-test dist/GlassTranslate.exe from a bare external folder.")
     p.add_argument("--exe", type=Path, default=DEFAULT_EXE)
     p.add_argument("--runs", default="static,A,B,C",
-                   help="comma list of static,A,B,C,D (default static,A,B,C; D = clean-profile manga-ocr download, ~200 MB)")
+                   help="comma list of static,A,B,C,D (default static,A,B,C; D = clean-profile manga-ocr "
+                        "download, ~200 MB), or portable on its own (the offline bundle, see smoke_portable.py)")
     p.add_argument("--mechanics", action="store_true",
                    help="only launch/exit/_MEI/log/lifecycle checks (no smoke-report assertions)")
     p.add_argument("--keep", action="store_true", help="keep the temp folder")
     p.add_argument("--json", type=Path, help="write the check list + info to this JSON file")
+    p.add_argument("--portable-zip", type=Path, help="portable run: GlassTranslate-<v>-portable-win64.zip")
+    p.add_argument("--models-zip", type=Path, help="portable run: GlassTranslate-<v>-models-win64.zip")
+    p.add_argument("--portable-dir", type=Path,
+                   help="portable run: an already unpacked GlassTranslate-<v> root (skips the unzip)")
     return p.parse_args(argv)
+
+
+def _finish(res: Results, args: argparse.Namespace) -> int:
+    print_table(res)
+    if args.json:
+        args.json.write_text(json.dumps({"ok": res.ok, "info": res.info,
+                                         "checks": [c.__dict__ for c in res.checks]}, indent=2), encoding="utf-8")
+    return 0 if res.ok else 1
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     args = parse_args(argv)
+    runs = [r.strip() for r in args.runs.split(",") if r.strip()]
+    if "portable" in runs:
+        # The portable run brings its own exe (out of the zip) and drives static/A/B/C itself.
+        if len(runs) != 1:
+            print("smoke_test: --runs portable cannot be combined with other runs", file=sys.stderr)
+            return 2
+        from smoke_portable import run_portable
+
+        res = Results()
+        try:
+            run_portable(args, res)
+        except Exception as exc:  # noqa: BLE001 - never lose the rows already collected
+            res.add("P0", "portable run completed", False, f"{type(exc).__name__}: {exc}")
+        return _finish(res, args)
     exe = args.exe if args.exe.is_absolute() else ROOT / args.exe
     if not exe.exists():
         print(f"smoke_test: exe not found: {exe}", file=sys.stderr)
         return 2
-    runs = [r.strip() for r in args.runs.split(",") if r.strip()]
     res = Results()
     res.info["exe"] = str(exe)
     res.info["mode"] = "mechanics" if args.mechanics else "full"
@@ -602,11 +675,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"kept: {sb.dir}")
             else:
                 sb.cleanup()
-    print_table(res)
-    if args.json:
-        args.json.write_text(json.dumps({"ok": res.ok, "info": res.info,
-                                         "checks": [c.__dict__ for c in res.checks]}, indent=2), encoding="utf-8")
-    return 0 if res.ok else 1
+    return _finish(res, args)
 
 
 if __name__ == "__main__":

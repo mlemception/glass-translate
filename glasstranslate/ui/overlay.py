@@ -273,6 +273,11 @@ class GlassOverlay(QWidget):
         self._segments: List[TranslatedSegment] = []
         self._patches: Dict[int, QImage] = {}  # clean patches of the current blocks, by index
         self._patch_serials: Dict[int, int] = {}  # style.clean_patch_serial each cached patch was made from
+        # Cache counters for the smoke report (docs/GLASS_DESIGN.md section 5): how many patches
+        # were converted to a QImage and how many of those replaced a cached image of the same
+        # block, i.e. a quality-renderer upgrade the overlay actually picked up.
+        self._patch_conversions = 0
+        self._patch_upgrades = 0
         self._opacity = 0.1
         self._font_family = "Segoe UI"
         self._hide_original = True
@@ -311,6 +316,13 @@ class GlassOverlay(QWidget):
     @property
     def segments(self) -> List[TranslatedSegment]:
         return list(self._segments)
+
+    @property
+    def patch_stats(self) -> Dict[str, int]:
+        """Clean-patch cache counters: ``conversions`` (BGR patch -> QImage) and ``upgrades``
+        (a conversion that replaced the cached image of the same block, so a sidecar result
+        reached the glass).  Read by the smoke report; never reset."""
+        return {"conversions": self._patch_conversions, "upgrades": self._patch_upgrades}
 
     # ------------------------------------------------------------------ api
     def set_segments(self, segments: Sequence[TranslatedSegment]) -> None:
@@ -794,7 +806,12 @@ class GlassOverlay(QWidget):
                 # converted image: the pair (segment, serial) is the cache key.
                 serial = int(seg.style.clean_patch_serial)
                 reused = self._patches.get(j) if j is not None and self._patch_serials.get(j) == serial else None
-                patches[i] = reused if reused is not None else bgr_to_qimage(seg.style.clean_patch)
+                if reused is None:
+                    reused = bgr_to_qimage(seg.style.clean_patch)
+                    self._patch_conversions += 1
+                    if j is not None and j in self._patches:
+                        self._patch_upgrades += 1  # same block, new serial: a sidecar upgrade
+                patches[i] = reused
                 serials[i] = serial
         self._segments = new
         self._typesets = typesets

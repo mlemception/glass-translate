@@ -9,66 +9,90 @@ variables for automated runs:
 * ``GLASSTRANSLATE_SMOKE_LOG`` - write the JSON smoke report of
   docs/GLASS_DESIGN.md section 5 to this path (screenshot PNG next to it).
 * ``GLASSTRANSLATE_LOGLEVEL`` - root logging level (default INFO).
+* ``GLASSTRANSLATE_SMOKE_ACTIONS`` - comma list of whitelisted actions to drive
+  (``downloadMangaOcr``, ``probeSidecar``, ``feedPage``); the app reports and quits
+  once they are done.
+* ``GLASSTRANSLATE_SMOKE_PAGE`` - still image the ``feedPage`` action feeds the pipeline
+  instead of the screen.
+
+The report itself and the actions live in ``smoke_report.py``; the names above are re-exported
+here, which is where the tests and ``packaging/smoke_test.py`` expect them.
 
 Frozen (PyInstaller, no console) specifics: logging goes to a rotating file under
-``%LOCALAPPDATA%/GlassTranslate/logs`` whenever ``sys.stderr`` is missing or the
-app is frozen, and Qt's own messages are routed to the ``qt`` logger.
+``settings.logs_dir()`` - the portable root's ``logs`` folder, else
+``%LOCALAPPDATA%/GlassTranslate/logs`` - whenever ``sys.stderr`` is missing or the app is
+frozen, and Qt's own messages are routed to the ``qt`` logger.
 """
 from __future__ import annotations
 
 import gc
-import importlib
-import json
 import logging
 import logging.handlers
 import os
 import sys
-import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, MutableMapping, Optional
 
-from PySide6.QtCore import QCoreApplication, QEvent, QFile, QObject, QRect, QTimer, QtMsgType, Signal, Slot, qInstallMessageHandler
-from PySide6.QtGui import QFontDatabase, QSurfaceFormat
-from PySide6.QtQml import QQmlExpression, qmlContext
-from PySide6.QtQuick import QQuickItem, QQuickView
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, QTimer, QtMsgType, Signal, Slot, qInstallMessageHandler
+from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from .. import __version__
-from ..config.settings import AppConfig, Hotkeys, OverlayGeometry, default_config_path, user_data_dir
+from ..config.settings import (
+    AppConfig,
+    Hotkeys,
+    OverlayGeometry,
+    cache_dir,
+    default_config_path,
+    is_portable,
+    logs_dir,
+)
+from ..core.interfaces import ScreenCapture
 from ..core.pipeline import Pipeline
 from ..core.types import PipelineStats
 from .capture_mode import CaptureMode
 from .control import ControlWindow, is_frozen
-from .glass import win32
 from .hotkeys import HotkeyManager
 from .overlay import GlassOverlay
+from .smoke_report import (  # noqa: F401 - re-exported: the tests and the packaging scripts read them here
+    PROBE_READY_TIMEOUT_S,
+    SMOKE_ACTION_DELAY_MS,
+    SMOKE_ACTION_SETTLE_MS,
+    SMOKE_ACTIONS_ENV,
+    SMOKE_GRAB_LEAD_MS,
+    SMOKE_LOG_ENV,
+    SMOKE_PAGE_ENV,
+    SMOKE_PAGES_LEAD_MS,
+    SmokeReport,
+    exercise_pages,
+)
 
-__all__ = ["GlassTranslateApp", "SmokeReport", "main"]
+__all__ = [
+    "GlassTranslateApp",
+    "PROBE_READY_TIMEOUT_S",
+    "SMOKE_ACTIONS_ENV",
+    "SMOKE_ACTION_DELAY_MS",
+    "SMOKE_ACTION_SETTLE_MS",
+    "SMOKE_GRAB_LEAD_MS",
+    "SMOKE_LOG_ENV",
+    "SMOKE_PAGES_LEAD_MS",
+    "SMOKE_PAGE_ENV",
+    "SmokeReport",
+    "exercise_pages",
+    "main",
+]
 
 log = logging.getLogger(__name__)
 
 AUTOEXIT_ENV = "GLASSTRANSLATE_AUTOEXIT_MS"
 CONFIG_ENV = "GLASSTRANSLATE_CONFIG"
-SMOKE_LOG_ENV = "GLASSTRANSLATE_SMOKE_LOG"
 LOGLEVEL_ENV = "GLASSTRANSLATE_LOGLEVEL"
 LOG_FILE_NAME = "glasstranslate.log"
 LOG_MAX_BYTES = 2_000_000
 LOG_BACKUP_COUNT = 3
-SMOKE_GRAB_LEAD_MS = 1500  # screenshot this long before the autoexit
-SMOKE_PAGES_LEAD_MS = 3000  # tab walk this long before the autoexit
-SMOKE_ACTIONS_ENV = "GLASSTRANSLATE_SMOKE_ACTIONS"  # comma list of whitelisted bridge slots to drive
-SMOKE_ACTION_DELAY_MS = 1500  # run the actions this long after start (window exposed, pipeline up)
-SMOKE_ACTION_SETTLE_MS = 8000  # after the last action: let the pipeline rebuild its engines, then report + quit
-_SMOKE_ACTIONS = ("downloadMangaOcr",)  # the only bridge slots the environment may drive
-MANGA_FONT_FAMILY = "Anime Ace 2.0 BB"
-PAGE_NAMES = ("TranslatePage", "OverlayPage", "EnginesPage", "HotkeysPage")
-_SHADER_STATUS_COMPILED, _SHADER_STATUS_UNCOMPILED, _SHADER_STATUS_ERROR = 0, 1, 2
-_RHI_NAMES = {
-    "Direct3D11": "D3D11", "Direct3D11Rhi": "D3D11", "Direct3D12": "D3D12", "OpenGL": "OpenGL",
-    "OpenGLRhi": "OpenGL", "Vulkan": "Vulkan", "VulkanRhi": "Vulkan", "Metal": "Metal", "MetalRhi": "Metal",
-    "Software": "Software", "Null": "Null", "NullRhi": "Null", "Unknown": "Unknown",
-}
+QML_CACHE_ENV = "QML_DISK_CACHE_PATH"  # where Qt puts the compiled QML cache
+RHI_CACHE_ENV = "QSG_RHI_DISABLE_DISK_CACHE"  # ...and whether it keeps a pipeline cache at all
 _QT_LEVELS = {
     QtMsgType.QtDebugMsg: logging.DEBUG,
     QtMsgType.QtInfoMsg: logging.INFO,
@@ -96,6 +120,10 @@ class GlassTranslateApp(QObject):
         self.overlay = GlassOverlay()
         self.hotkeys = HotkeyManager(self)
         self.pipeline: Optional[Pipeline] = None
+        # None = the pipeline's own default (a real screen-capture backend).  The feedPage smoke
+        # action puts a StaticPageCapture factory here before the pipeline starts; a pipeline
+        # that is already running is handed the factory through ``Pipeline.replace_capture``.
+        self.capture_factory: Optional[Callable[[AppConfig], ScreenCapture]] = None
         self.last_stats: Optional[PipelineStats] = None
         self._bound_hotkeys: Optional[Hotkeys] = None
         self._torn_down = False
@@ -170,11 +198,15 @@ class GlassTranslateApp(QObject):
 
     def start_pipeline(self) -> None:
         if self.pipeline is None or not self.pipeline.is_alive():
+            extra: Dict[str, Any] = {}
+            if self.capture_factory is not None:
+                extra["capture_factory"] = self.capture_factory
             self.pipeline = Pipeline(
                 self.cfg,
                 region_provider=self.overlay.physical_rect,
                 on_result=self._result_ready.emit,
                 on_status=self._status_ready.emit,
+                **extra,
             )
             self.pipeline.start()
         else:
@@ -284,7 +316,7 @@ def _configure_logging(logger: Optional[logging.Logger] = None, *, frozen: Optio
 
     A ``StreamHandler`` only when ``sys.stderr`` exists (it is ``None`` in a no-console exe, where
     ``basicConfig`` would silently discard everything); a ``RotatingFileHandler`` under
-    ``%LOCALAPPDATA%/GlassTranslate/logs`` when frozen or without stderr.  Returns the handlers
+    ``settings.logs_dir()`` when frozen or without stderr.  Returns the handlers
     added (empty when the logger was already configured).
     """
     root = logger if logger is not None else logging.getLogger()
@@ -296,7 +328,7 @@ def _configure_logging(logger: Optional[logging.Logger] = None, *, frozen: Optio
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())
     if sys.stderr is None or frozen:
-        log_dir = user_data_dir() / "logs"
+        log_dir = logs_dir()
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             handlers.append(
@@ -314,317 +346,34 @@ def _configure_logging(logger: Optional[logging.Logger] = None, *, frozen: Optio
     return handlers
 
 
+def apply_portable_qt_environment(env: MutableMapping[str, str] = os.environ) -> Dict[str, str]:
+    """Keep Qt's two disk caches out of the user profile in portable mode.
+
+    Qt writes both to ``QStandardPaths::CacheLocation`` - ``%LOCALAPPDATA%\\GlassTranslate\\
+    cache`` - whatever the app's own paths say: the **QML compilation cache**
+    (``qmlcache/*.qmlc``) and the scene graph's **automatic RHI pipeline cache**
+    (``qtpipelinecache-*``), about 6 MB together.  A portable bundle may not leave that behind,
+    so the QML cache is redirected into :func:`~glasstranslate.config.settings.cache_dir` and
+    the pipeline cache is switched off: every shader ships as a precompiled ``.qsb``, so there
+    is nothing measurable to regain from caching the pipelines.
+
+    Outside portable mode nothing is touched, and a variable the environment already carries is
+    never overridden.  Returns what it set.  **Call before the QApplication exists.**
+    """
+    if not is_portable():
+        return {}
+    wanted = {QML_CACHE_ENV: str(cache_dir() / "qmlcache"), RHI_CACHE_ENV: "1"}
+    applied = {key: value for key, value in wanted.items() if key not in env}
+    for key, value in applied.items():
+        env[key] = value
+    return applied
+
+
 def _qt_message_handler(mode: QtMsgType, context: Any, message: str) -> None:
     """Route Qt / QML messages to the ``qt`` logger (there is no console in the exe)."""
     category = getattr(context, "category", "") or "default"
     logging.getLogger("qt").log(_QT_LEVELS.get(mode, logging.WARNING), "[%s] %s", category, message)
 
-
-# --------------------------------------------------------------------------- smoke report
-def _qml_number(item: QObject, expression: str) -> Optional[float]:
-    """Evaluate a QML expression on ``item`` as a number (enum properties have no Python converter)."""
-    context = qmlContext(item)
-    if context is None:
-        return None
-    expr = QQmlExpression(context, item, f"Number({expression})")
-    result = expr.evaluate()
-    value = result[0] if isinstance(result, tuple) else result
-    if expr.hasError() or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _quick_items(control: QQuickView) -> List[QQuickItem]:
-    root = control.rootObject()
-    if root is None:
-        return []
-    return [root] + list(root.findChildren(QQuickItem))
-
-
-def _shader_effects(control: QQuickView) -> Dict[str, Any]:
-    """Walk every item exposing ``fragmentShader`` + ``status``; ``error`` gates, ``compiled`` informs."""
-    total = compiled = error = 0
-    logs: List[str] = []
-    for item in _quick_items(control):
-        mo = item.metaObject()
-        if mo.indexOfProperty("fragmentShader") < 0 or mo.indexOfProperty("status") < 0:
-            continue
-        total += 1
-        status = _qml_number(item, "status")
-        if status == _SHADER_STATUS_COMPILED:
-            compiled += 1
-        elif status == _SHADER_STATUS_ERROR:
-            error += 1
-        text = item.property("log")
-        if text:
-            logs.append(str(text))
-    return {"total": total, "compiled": compiled, "error": error, "logs": logs}
-
-
-def _ssl_available() -> bool:
-    """``import ssl`` works in this tree (the frozen exe must carry CPython's OpenSSL DLLs for any https)."""
-    try:
-        importlib.import_module("ssl")
-    except ImportError:
-        return False
-    return True
-
-
-def _rhi_backend(control: QQuickView) -> str:
-    try:
-        api = control.rendererInterface().graphicsApi()
-    except Exception:  # pragma: no cover - scene graph not initialised yet
-        return "Unknown"
-    name = getattr(api, "name", None) or str(api).rsplit(".", 1)[-1]
-    return _RHI_NAMES.get(str(name), str(name))
-
-
-def _class_matches(class_name: str, base: str) -> bool:
-    return class_name == base or class_name.startswith(base + "_QMLTYPE") or class_name.startswith(base + "_QML")
-
-
-def _qrc_component_names() -> Tuple[List[str], List[str]]:
-    """(Glass* components, pages) present in the compiled ``:/qml`` resources."""
-    from PySide6.QtCore import QDir
-
-    comps = sorted(f[:-4] for f in QDir(":/qml").entryList(["Glass*.qml"]) if f.endswith(".qml"))
-    pages = sorted(f[:-4] for f in QDir(":/qml/pages").entryList(["*.qml"]) if f.endswith(".qml"))
-    return comps, pages
-
-
-def exercise_pages(control: QQuickView) -> Tuple[bool, Dict[str, Any]]:
-    """Open every page through the tab bar and check every Glass* component was instantiated.
-
-    The tab bar is found by ``objectName == "tabBar"`` or by class name (``GlassSegmentedBar``);
-    its ``currentIndex`` is set to 0..3 (then back to 0).  Returns ``(pages_ok, details)``.
-    """
-    details: Dict[str, Any] = {"opened": [], "missing": [], "tab_bar": False}
-    root = control.rootObject()
-    if root is None:
-        details["error"] = "no root object"
-        return False, details
-    bar = root.findChild(QQuickItem, "tabBar")
-    if bar is None:
-        for item in _quick_items(control):
-            if _class_matches(item.metaObject().className(), "GlassSegmentedBar"):
-                bar = item
-                break
-    if bar is not None and bar.metaObject().indexOfProperty("currentIndex") >= 0:
-        details["tab_bar"] = True
-        app = QCoreApplication.instance()
-        for index in range(len(PAGE_NAMES)):
-            bar.setProperty("currentIndex", index)
-            if app is not None:
-                app.processEvents()
-            if int(bar.property("currentIndex") or 0) == index:
-                details["opened"].append(index)
-        bar.setProperty("currentIndex", 0)
-        if app is not None:
-            app.processEvents()
-    class_names = [item.metaObject().className() for item in _quick_items(control)]
-    comps, pages = _qrc_component_names()
-    required = list(comps) + (pages or list(PAGE_NAMES))
-    for base in required:
-        if not any(_class_matches(name, base) for name in class_names):
-            details["missing"].append(base)
-    details["required"] = required
-    ok = details["tab_bar"] and len(details["opened"]) == len(PAGE_NAMES) and not details["missing"]
-    return ok, details
-
-
-class SmokeReport(QObject):
-    """Writes the JSON report of docs/GLASS_DESIGN.md section 5 for automated runs.
-
-    With an autoexit, the tab walk runs ``SMOKE_PAGES_LEAD_MS`` and the ``grabWindow()``
-    screenshot ``SMOKE_GRAB_LEAD_MS`` before the quit, the latter only after at least one
-    ``frameSwapped`` (a grab from ``aboutToQuit`` finds an unexposed window).  Without an
-    autoexit - or if the timers never fired - the report is written from ``aboutToQuit``
-    without a screenshot, so the file always exists.
-    """
-
-    def __init__(self, session: GlassTranslateApp, path: Path, autoexit_ms: Optional[int],
-                 parent: Optional[QObject] = None) -> None:
-        super().__init__(parent)
-        self.session = session
-        self.path = Path(path)
-        self.written = False
-        self._frames = 0
-        self._pending_grab = False
-        self._pages: Optional[Tuple[bool, Dict[str, Any]]] = None
-        session.control.frameSwapped.connect(self._on_frame)
-        if autoexit_ms is not None:
-            QTimer.singleShot(max(100, autoexit_ms - SMOKE_PAGES_LEAD_MS), self._walk_pages)
-            QTimer.singleShot(max(200, autoexit_ms - SMOKE_GRAB_LEAD_MS), self._grab_and_write)
-        app = QCoreApplication.instance()
-        if app is not None:
-            app.aboutToQuit.connect(self.write_if_needed)
-        # Whitelisted UI actions driven from the environment (smoke run D drives the manga-ocr
-        # download this way on a clean %LOCALAPPDATA%); the report carries their outcome.
-        self._actions: Dict[str, Dict[str, Any]] = {}
-        self._action_t0 = 0.0
-        self._pending_actions: List[str] = []
-        for name in (n.strip() for n in os.environ.get(SMOKE_ACTIONS_ENV, "").split(",")):
-            if not name:
-                continue
-            if name in _SMOKE_ACTIONS:
-                if name not in self._pending_actions:
-                    self._pending_actions.append(name)
-            else:
-                log.warning("smoke: ignoring unknown action %r", name)
-        if self._pending_actions:
-            QTimer.singleShot(SMOKE_ACTION_DELAY_MS, self._run_actions)
-
-    @Slot()
-    def _run_actions(self) -> None:
-        """Drive the whitelisted bridge slots requested through ``GLASSTRANSLATE_SMOKE_ACTIONS``."""
-        from ..ocr.models import models_ready
-
-        bridge = self.session.control.bridge
-        for name in self._pending_actions:
-            if name == "downloadMangaOcr":
-                models_dir = str(bridge.modelsDir)
-                self._actions[name] = {
-                    "started": True, "finished": False, "seconds": None, "label": "", "progress": -1,
-                    "models_dir": models_dir, "models_ready_before": models_ready(models_dir),
-                    "models_ready_after": None,
-                }
-                self._action_t0 = time.perf_counter()
-                bridge.downloadChanged.connect(self._on_action_download_changed)
-                bridge.downloadMangaOcr()
-        self._pending_actions = []
-
-    @Slot()
-    def _on_action_download_changed(self) -> None:
-        from ..ocr.models import models_ready
-
-        bridge = self.session.control.bridge
-        record = self._actions.get("downloadMangaOcr")
-        if record is None or record["finished"]:
-            return
-        record["label"] = str(bridge.downloadLabel)
-        record["progress"] = int(bridge.downloadProgress)
-        if not bridge.downloadActive:
-            record["finished"] = True
-            record["seconds"] = round(time.perf_counter() - self._action_t0, 1)
-            record["models_ready_after"] = models_ready(record["models_dir"])
-            QTimer.singleShot(SMOKE_ACTION_SETTLE_MS, self._finish_after_actions)
-
-    @Slot()
-    def _finish_after_actions(self) -> None:
-        """Report and quit as soon as the actions are done instead of waiting for the autoexit."""
-        self._grab_and_write()
-        app = QCoreApplication.instance()
-        if app is not None:
-            app.quit()
-
-    @Slot()
-    def _on_frame(self) -> None:
-        self._frames += 1
-        if self._pending_grab:
-            self._pending_grab = False
-            self._grab_and_write()
-
-    @Slot()
-    def _walk_pages(self) -> None:
-        if self._pages is None:
-            try:
-                self._pages = exercise_pages(self.session.control)
-            except Exception as exc:  # pragma: no cover - report the failure instead of crashing
-                log.exception("smoke: page walk failed")
-                self._pages = (False, {"error": repr(exc)})
-
-    @Slot()
-    def _grab_and_write(self) -> None:
-        if self.written:
-            return
-        if self._frames == 0:
-            self._pending_grab = True  # wait for the first swapped frame
-            return
-        if self._pages is None:
-            self._walk_pages()
-        screenshot: Optional[Path] = None
-        try:
-            image = self.session.control.grabWindow()
-            if not image.isNull():
-                screenshot = self.path.with_suffix(".png")
-                image.save(str(screenshot))
-        except Exception:  # pragma: no cover
-            log.exception("smoke: grabWindow failed")
-        self.write(screenshot)
-
-    @Slot()
-    def write_if_needed(self) -> None:
-        if not self.written:
-            if self._pages is None and self.session.control.rootObject() is not None:
-                self._walk_pages()
-            self.write(None)
-
-    def build(self, screenshot: Optional[Path]) -> Dict[str, Any]:
-        control = self.session.control
-        bridge = control.bridge
-        appearance = control.appearance.signals
-        pages_ok, pages_detail = self._pages if self._pages is not None else (False, {"error": "not run"})
-        geom = control.geometry()
-        dpr = float(control.devicePixelRatio() or 1.0)
-        return {
-            "frozen": is_frozen(),
-            "meipass": getattr(sys, "_MEIPASS", None),
-            "exe": sys.executable,
-            "version": __version__,
-            "qml_status": control.status().name if hasattr(control.status(), "name") else str(control.status()),
-            "qml_errors": [e.toString() for e in control.errors()],
-            "qml_warnings": list(control.qml_warnings),
-            "shader_effects": _shader_effects(control),
-            "rhi_backend": _rhi_backend(control),
-            "appearance": {
-                "mode": appearance.mode,
-                "transparency": appearance.transparency,
-                "reduceMotion": appearance.reduce_motion,
-                "highContrast": appearance.high_contrast,
-                "darkMode": appearance.dark_mode,
-                "textScale": appearance.text_scale,
-            },
-            "backdrop_serial": int(bridge.backdropSerial),
-            "backdrop_luma": float(bridge.backdropLuma),
-            "ink_polarity": int(bridge.inkPolarity),
-            "fonts_ok": MANGA_FONT_FAMILY in QFontDatabase.families(),
-            "ssl_ok": _ssl_available(),
-            "resources_ok": {
-                "qml": QFile.exists(":/qml/Main.qml"),
-                "shaders": all(QFile.exists(f":/qml/shaders/{n}.frag.qsb") for n in ("glass", "blur", "shadow")),
-                "fonts": all(QFile.exists(f":/fonts/animeace2_{n}.ttf") for n in ("reg", "ital")),
-                "icon": QFile.exists(":/icons/app.png"),
-            },
-            "control_exposed": control.isExposed(),
-            "overlay_shown": self.session.overlay.isVisible(),
-            "pages_ok": bool(pages_ok),
-            "pages_detail": pages_detail,
-            "dpi_awareness": win32.dpi_awareness(),
-            "status_history": list(control.status_history),
-            # last pipeline stats as shown on the status strip (proof that passes produced output)
-            "stats": {name: str(getattr(bridge.stats, name, "")) for name in
-                      ("totalText", "fpsText", "stagesText", "segmentsText", "cacheText", "devicesText")},
-            "dpr": dpr,
-            "window": {"x": geom.x(), "y": geom.y(), "w": geom.width(), "h": geom.height(), "dpr": dpr},
-            "frames_swapped": self._frames,
-            "actions": self._actions,
-            "screenshot": str(screenshot.resolve()) if screenshot is not None else None,
-        }
-
-    def write(self, screenshot: Optional[Path]) -> None:
-        report = self.build(screenshot)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(report, fh, indent=2, ensure_ascii=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
-        self.written = True
-        log.info("smoke report written to %s", self.path)
 
 
 # ----------------------------------------------------------------------------------- main
@@ -639,6 +388,11 @@ def main(config_path: Optional[Path] = None, argv: Optional[List[str]] = None) -
     config_path = Path(config_path)
     cfg = AppConfig.load(config_path)
 
+    # Before the QApplication: both variables are read when Qt builds its engines.
+    applied = apply_portable_qt_environment()
+    if applied:
+        log.info("portable mode: %s", ", ".join(f"{k}={v}" for k, v in sorted(applied.items())))
+
     # Per-pixel alpha for the translucent QQuickView: the default surface format must carry an
     # alpha channel before the application (and its scene graph) exists.
     fmt = QSurfaceFormat()
@@ -651,12 +405,15 @@ def main(config_path: Optional[Path] = None, argv: Optional[List[str]] = None) -
     app.setQuitOnLastWindowClosed(False)
     session = GlassTranslateApp(cfg, config_path)
     session.control.closed.connect(app.quit)
-    app.aboutToQuit.connect(session.shutdown)
 
     autoexit_env = os.environ.get(AUTOEXIT_ENV)
     autoexit_ms = max(0, int(autoexit_env)) if autoexit_env else None
     smoke_path = os.environ.get(SMOKE_LOG_ENV)
+    # Connected to aboutToQuit *before* the shutdown hook on purpose: Qt runs those slots in
+    # connection order, and the report's grabWindow must not wait behind the pipeline tearing a
+    # quality sidecar down (which can take tens of seconds after a real job).
     smoke = SmokeReport(session, Path(smoke_path), autoexit_ms) if smoke_path else None
+    app.aboutToQuit.connect(session.shutdown)
 
     session.show()
     if autoexit_ms is not None:

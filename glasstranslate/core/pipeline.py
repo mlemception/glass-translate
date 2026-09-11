@@ -189,6 +189,7 @@ class Pipeline(threading.Thread):
         self._rebuild_change_detector = True
         self._next_engine_attempt = 0.0
 
+        self._pending_capture: Optional[Callable[[AppConfig], ScreenCapture]] = None
         self._capture: Optional[ScreenCapture] = None
         self._ocr: Optional[OCREngine] = None
         self._translator: Optional[Translator] = None
@@ -268,6 +269,32 @@ class Pipeline(threading.Thread):
         with self._lock:
             self._invalidate_requested = True
 
+    def replace_capture(self, factory: Callable[[AppConfig], ScreenCapture]) -> None:
+        """Swap the capture backend on the next pass, keeping every other engine.
+
+        Restarting the worker to change where frames come from would tear a half-built engine
+        down mid-flight: :meth:`stop` cannot interrupt a model load, so a new worker starts
+        loading its own OCR session while the old one is still loading - and two concurrent
+        onnxruntime-DirectML sessions crash the process.  The running worker therefore adopts
+        the new factory itself, rebuilds only the capture and re-reads the whole region.
+        """
+        with self._lock:
+            self._pending_capture = factory
+            self._invalidate_requested = True
+
+    def quality_snapshot(self) -> Dict[str, Any]:
+        """Read-only view of the quality renderer for reports and diagnostics.
+
+        ``active`` is "a scheduler exists" (the setting is on and a sidecar launcher was
+        found), ``available`` "a job has succeeded and nothing failed since", ``stats`` the
+        scheduler's counters.  Safe from any thread: the attribute read is atomic and
+        ``stats`` takes the scheduler's own lock.
+        """
+        scheduler = self._quality
+        if scheduler is None:
+            return {"active": False, "available": False, "stats": {}}
+        return {"active": True, "available": bool(scheduler.available), "stats": dict(scheduler.stats)}
+
     def refresh_models(self) -> None:
         """Rebuild the translator and the OCR chain so newly installed packages are picked up.
 
@@ -313,6 +340,7 @@ class Pipeline(threading.Thread):
         # here, before anything else looks at the live styles.
         self._quality_applied += self._drain_quality()
         self._apply_pending_config()
+        self._apply_pending_capture()
         if not self._ensure_engines():
             return None
         assert self._capture is not None and self._ocr is not None
@@ -429,6 +457,28 @@ class Pipeline(threading.Thread):
             ):
                 self._invalidate_requested = True
             self._next_engine_attempt = 0.0
+
+    def _apply_pending_capture(self) -> None:
+        """Worker thread: adopt the factory :meth:`replace_capture` handed over.
+
+        Only the capture is released; the OCR chain, the translator, the change detector and
+        the quality scheduler keep running.  The live segments and the tile hashes describe
+        the old source, so both are dropped and the next pass re-reads everything.
+        """
+        with self._lock:
+            factory, self._pending_capture = self._pending_capture, None
+        if factory is None:
+            return
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            try:
+                capture.close()
+            except Exception:  # pragma: no cover - best effort
+                log.exception("closing %s failed", capture)
+        self._capture_factory = factory
+        self._live.clear()
+        if self._change_detector is not None:
+            self._change_detector.reset()
 
     def _ensure_engines(self) -> bool:
         """Build or rebuild engines as flagged.  Returns False (after reporting)
