@@ -1,0 +1,23 @@
+{
+  "_comment": "English lettering of 3eng.jpg keyed by the OCR block text of 3jp.jpg; bootstrapped by demo/typeset_reference.py from OCR of the reference page and then corrected by hand from the demo/output/reference/3jp review sheets. Blocks left empty keep the machine translation.",
+  "_uncertain": [
+    "呪術廻戦"
+  ],
+  "呪術廻戦": "",
+  "爺ちゃんにじゃねえよ買ってんだ": "They're not for you. They're for the nurses.",
+  "花とかもいちいち買ってん貯金しろ": "Don't be buying flowers all the time. Save your money.",
+  "こんな消毒くせえサボッてんじゃ": "Don't go wasting your time at a sad place like this.",
+  "部活はどうしたよ": "Hey, what about your school club?",
+  "尚更だ馬鹿": "Even more so then, you idiot!",
+  "いちいち見舞いなんて": "I wouldn't come here so often if I wasn't so bored!",
+  "C": "Roll",
+  "うるせえなあ部活は５時前に終わんの！": "That's enough! My club finishes before five!",
+  "んー？": "Yeah?",
+  "多ゆとりかよ": "A stress-free life, huh? Tch...",
+  "オマエは強いから": "You're a strong kid, so...",
+  "人を助けろ": "...help people.",
+  "手のく範囲でいい": "It doesn't have to be all the time.",
+  "迷っても": "You may feel lost. Don't expect gratitude.",
+  "教える奴は救っとけ": "Just whenever you can.",
+  "とにかく助けてやれ": "Just help them."
+}

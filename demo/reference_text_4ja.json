@@ -1,0 +1,19 @@
+{
+  "_comment": "English lettering of 4eng.jpg keyed by the OCR block text of 4ja.jpg; bootstrapped by demo/typeset_reference.py from OCR of the reference page and then corrected by hand from the demo/output/reference/4ja review sheets. Blocks left empty keep the machine translation.",
+  "_uncertain": [
+    "お友達じゅぶっ…？"
+  ],
+  "オマエが持ってる呪物はとても危険なものだ今すぐこっちに渡せ": "The cursed object you have is extremely dangerous. Hand it over right away.",
+  "悪いが時間がない": "Sorry, but there's no time.",
+  "呪術高専の伏黒だ": "I'm from Jujutsu High School.",
+  "お友達じゅぶっ…？": "Cursed object? A friend?",
+  "惠": "Jujutsu High School first-year Megumi Fushiguro",
+  "あーはいはい拾ったわ": "Oh yeah! I found it.",
+  "んー？": "Hm?",
+  "待ってる": "This. You have it, right?",
+  "日本国内での怪死者・行方不明者は年平均10000人を超える": "Nationally, the average number of unexplained deaths and missing persons exceeds 10,000 annually.",
+  "くんないと": "I'd at least like an explanation.",
+  "気に入ってん": "...my fellow club members have taken a liking to it.",
+  "俺は別に": "I don't really mind giving it back, but...",
+  "26": "26"
+}

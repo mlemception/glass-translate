@@ -1,0 +1,22 @@
+{
+  "_comment": "English lettering of 1eng.jpg keyed by the OCR block text of 1ja.jpg; bootstrapped by demo/typeset_reference.py from OCR of the reference page and then corrected by hand against the demo/output/reference/1ja/ review sheets. Blocks the English page leaves untranslated are \"\".",
+  "_uncertain": [
+    "第1話両面宿儺"
+  ],
+  "馬鹿過ぎるでしょ": "You're telling me someone's keeping a special-grade cursed object",
+  "そんな所に": "In a place like this?",
+  "百葉箱！？": "A thermometer shed?!",
+  "でもおかげで回収も楽でしょ": "Recovering it should be no problem then!",
+  "第1話両面宿儺": "Chapter 1: Ryomen Sukuna",
+  "記錄": "Report:",
+  "2018年6月": "June 2018",
+  "宮城県仙台市杉沢第三高校": "Sugisawa Municipal High School #3 Sendai City, Miyagi Prefecture",
+  "ないですよ": "There's nothing here",
+  "……": "...",
+  "空っぽです": "The shed is empty.",
+  "え？": "Huh?",
+  "マジで？ウケるね（笑）": "For real? That's hilarious!",
+  "駄目だから": "No going home until it's recovered, okay?",
+  "ますよ……": "I'm gonna punch you.",
+  "殴ろう": "Gonna hit you for real this time!"
+}
