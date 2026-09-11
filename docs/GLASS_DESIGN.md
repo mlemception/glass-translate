@@ -4,7 +4,8 @@ Contract for the redesign of the settings/control window (`glasstranslate/ui/con
 the PyInstaller build. The **glass overlay (`overlay.py`) is out of scope** except for loading its
 fonts from Qt resources and the two deliberate exceptions of the 2026-09-09 feature batch (F1
 capture mode): `GlassOverlay.set_capture_excluded(bool)` and the stored capture affinity that
-`showEvent` re-applies (see §2.3 "Misc" and §3 `overlayCaptureMode`). Everything below was de-risked by the probes under
+`showEvent` re-applies (see §2.3 "Misc" and §3 `overlayCaptureMode`; since 2026-09-10 capture mode
+covers the control window too — `ControlWindow.set_capture_excluded(bool)`, §1). Everything below was de-risked by the probes under
 `demo/output/probes/` (reports in `demo/output/probes/reports/*.md`); numbers quoted there are
 measured on this machine (Win 11 26200, RTX 4080, one 5120x1440 monitor at DPR 1.0).
 
@@ -48,7 +49,8 @@ app.py ─ GlassTranslateApp ─┬─ ControlWindow (QQuickView subclass, frame
   `glasstranslate/ui/__init__.py` and `app.py` keep working). Public contract (unchanged, all used
   by `app.py`):
   - signals `config_changed(object)`, `start_stop_requested(bool)`, `grab_mode_requested()`,
-    `toggle_glass_requested()`, `capture_mode_requested(bool)` (F1, runtime only), `models_changed()`,
+    `toggle_glass_requested()`, `capture_mode_requested(bool)` (F1, runtime only; the app answers it by
+    calling `set_capture_excluded` on the overlay *and* this window), `models_changed()`,
     `closed()`;
   - methods `show()`, `load_config(cfg)`, `set_running(bool)`, `update_stats(PipelineStats)`,
     `show_status(str)`, `save_soon()`, `save_now()`, property `config`;
@@ -78,7 +80,14 @@ app.py ─ GlassTranslateApp ─┬─ ControlWindow (QQuickView subclass, frame
   Enter/Esc). Win+Arrow snapping / Snap Layouts are documented as unsupported in the README.
 - After native creation (`showEvent`, re-applied cheaply on every show):
   `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE=0x11)` so the backdrop grab (and the
-  pipeline's capture) see *through* the panel. Also `DWMWA_WINDOW_CORNER_PREFERENCE` is not needed
+  pipeline's capture) see *through* the panel. The flag is stored
+  (`ControlWindow.set_capture_excluded(bool)` / `capture_excluded`, default excluded) and `showEvent`
+  re-applies the stored value (while no platform window exists — before the first show or after
+  `close()` destroyed it — the flag is only stored, never applied through `winId()`), so capture
+  mode (§2.3 "Misc", 2026-09-10) can clear it: while the
+  window is capturable its backdrop grabber is paused (an mss grab would sample the panel itself),
+  the last backdrop stays on the glass, frames still in flight are dropped, and re-excluding resumes
+  the grabber with a forced fresh grab. Also `DWMWA_WINDOW_CORNER_PREFERENCE` is not needed
   (we draw our own shape; window is fully transparent outside the slab).
 - Anything that used `QWidget` dialogs: models-dir Browse uses `QFileDialog.getExistingDirectory(None, ...)`
   (native dialog, no parent); download progress and errors are shown **inline in QML** (glass
@@ -466,13 +475,16 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   - `OverlayPage`: card "Glass": Background opacity (`GlassSlider 0..100 %`, `live: true` so the
     overlay previews while dragging), Font (`GlassFontComboBox`), Hide original (`GlassToggle`);
     card "Typesetting": Manga mode toggle, Uppercase toggle (disabled when manga off), hints = the
-    old tooltips; card "Misc": Capture mode (`GlassToggle`, `objectName captureModeToggle`) bound
-    to the runtime-only `bridge.overlayCaptureMode` — on: the *overlay* window clears
-    `WDA_EXCLUDEFROMCAPTURE` (`win32.set_capture_excluded(window, False)`) so screenshot /
-    screen-recording tools see the glass, and the pipeline is paused (its own grabs would OCR the
-    lettering); off: re-excluded, resumed iff `running_on_start`. Never persisted, starts off every
-    session, cleared again at shutdown; the control window itself stays excluded (its backdrop
-    grabber would otherwise sample the panel).
+    old tooltips; card "Misc": Capture mode (`GlassToggle`, `objectName captureModeToggle`, text
+    "Show the glass and this window to screen capture") bound to the runtime-only
+    `bridge.overlayCaptureMode` — on: the overlay *and this window* clear `WDA_EXCLUDEFROMCAPTURE`
+    (`set_capture_excluded(False)` on both, driven by `ui/capture_mode.py`) so screenshot /
+    screen-recording tools see the glass and the panel; the pipeline is paused (its own grabs would
+    OCR the lettering) and the panel's backdrop grabber is frozen on its last frame (§1); off: both
+    re-excluded, the grabber resumes with a fresh grab, the pipeline resumes iff `running_on_start`.
+    Never persisted, starts off every session, cleared again at shutdown (`CaptureMode.restore`).
+    (Until 2026-09-10 the control window stayed excluded; the change is deliberate: a capture of
+    the app should show the panel too.)
   - `EnginesPage`: card "OCR": engine, device; card "Translation": backend, translate device
     (enabled iff argos), API URL + API key (password; enabled iff libretranslate), Models dir
     (`GlassTextField` + Browse, always enabled), buttons `Download model…` and `Get Sugoi (ja→en)…`
@@ -558,7 +570,8 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   `mangaOcrModelsReady` (re-read on `downloadChanged`), slot `downloadMangaOcr()` reuses the
   progress row and emits `models_changed` on success (the pipeline rebuilds the OCR chain).
 - State: `running`, `overlayCaptureMode` (read/write, runtime only — never touches `AppConfig`;
-  a set emits `capture_mode_requested(bool)`), `statusMessage` (initial value `"Ready"`), `stats` (QObject: `totalText "12.3 ms"`,
+  a set emits `capture_mode_requested(bool)`; the name predates 2026-09-10, the mode now covers the
+  control window too), `statusMessage` (initial value `"Ready"`), `stats` (QObject: `totalText "12.3 ms"`,
   `fpsText "8.1"`, `stagesText`, `segmentsText`, `cacheText`, `devicesText` — exact same formatting as
   the old `update_stats`), `downloadActive`, `downloadLabel`, `downloadProgress` (-1 = indeterminate,
   else 0..100), `backdropSerial`, `backdropOrigin`, `backdropShift`, `backdropLuma`, `inkPolarity` (§1.2), `windowTitle`.
