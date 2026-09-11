@@ -1,0 +1,31 @@
+# GlassTranslate quality-renderer sidecar - Windows 11 / CPython 3.13 / RTX 4080.
+#
+# This venv is SEPARATE from the app's .venv on purpose: the main app and the
+# PyInstaller exe must stay torch-free.  Install it with renderer\install.bat.
+#
+# Every pin below was resolved and imported on this machine (see
+# docs/perf/2026-09-11-quality-renderer-timings.md).  cu130 is the stable CUDA
+# variant for torch 2.14 (cu128 was removed in the 2.12 cycle; driver 591.86 /
+# CUDA 13.1 covers it under minor-version compatibility).
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+torch==2.14.0+cu130
+torchvision==0.29.0+cu130
+
+diffusers==0.40.0
+# Pinned: diffusers declares no upper bound on transformers and 5.17 broke it.
+transformers==5.16.1
+accelerate==1.15.0
+safetensors==0.8.0
+peft==0.20.0
+huggingface-hub==1.31.0
+tokenizers==0.23.2
+# from_single_file parses the original SD yaml configs through omegaconf.
+omegaconf==2.3.1
+
+numpy==2.5.2
+pillow==12.3.0
+opencv-python-headless==5.0.0.93
+requests==2.34.2
+
+pytest==9.1.1

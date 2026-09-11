@@ -17,3 +17,4 @@ glasstranslate/ui/resources_rc.py
 
 # Local credentials for live checks (never committed)
 Secret/
+renderer/.venv/
