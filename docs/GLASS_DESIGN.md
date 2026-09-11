@@ -500,7 +500,16 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
     bound to `bridge.seriesPromptTemplate`, placeholder = the built-in template; `[Series Name]` is
     substituted case-insensitively at request time, an empty stored template means "built-in", a
     malformed one falls back to the built-in with one status warning) and `Reset to default`
-    (`bridge.resetPromptTemplate()`, enabled iff a custom template is stored); card "Pipeline": Refresh rate
+    (`bridge.resetPromptTemplate()`, enabled iff a custom template is stored);
+    card "Quality renderer" (`objectName qualityCard`, always visible): Mode
+    (`GlassComboBox`, `objectName qualityRendererCombo`, model `bridge.qualityRendererOptions` =
+    `[{value:"off",text:"Off"},{value:"auto",text:"On when available"}]`, value
+    `bridge.qualityRenderer`) with `bridge.qualityStatus` as the row hint - one of
+    `"Off"`, `"Sidecar not installed - run renderer\install.bat"`,
+    `"Models not downloaded (<size> GB)"`, `"Ready"` - and `Download quality models…`
+    (`GlassButton`, `objectName qualityDownloadButton`, enabled iff `!bridge.downloadActive`,
+    `bridge.downloadQualityModels()`, same inline progress row as the manga-ocr download);
+    card "Pipeline": Refresh rate
     (`GlassStepper 0.5–60 step .5 " Hz"`), Debounce (`0–2000 step 10 " ms"`), Min OCR confidence
     (`0–1 step .05, 2 decimals`).
   - `HotkeysPage`: card "Global hotkeys" (hint "pynput syntax, e.g. <ctrl>+<alt>+g"): Toggle grab
@@ -565,10 +574,20 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
 - Module split (F4-5): `bridge_fields.py` (LANGUAGES, `_CONFIG_FIELDS`, coercers, `_config_property`,
   `format_stats`, `download_label/progress`, `translate_device_items`, `is_frozen`),
   `stats_model.py` (`StatsModel`) and `download_workers.py` (`ModelDownloadWorker`,
-  `MangaOcrDownloadWorker`) are re-exported by `control.py`; import sites are unchanged.
+  `MangaOcrDownloadWorker`, `QualityModelsDownloadWorker`) are re-exported by `control.py`;
+  import sites are unchanged.
 - OCR (F3): `ocrEngines` lists `mangaocr` / `paddleocr` with `ocr.factory.engine_label` texts;
   `mangaOcrModelsReady` (re-read on `downloadChanged`), slot `downloadMangaOcr()` reuses the
   progress row and emits `models_changed` on success (the pipeline rebuilds the OCR chain).
+- Quality renderer: config property `qualityRenderer` (`off` | `auto`; anything else is coerced to
+  `off` by `config.settings.normalize_quality_renderer`, so a hand-edited config can never launch
+  the sidecar), list `qualityRendererOptions`, read-only `qualityStatus` and `qualityModelsReady`
+  (both notify on `qualityChanged`, which the bridge emits from `downloadChanged` and from a
+  `qualityRenderer` / `modelsDir` edit), slot `downloadQualityModels()` (a
+  `QualityModelsDownloadWorker` on the shared progress row; `models_changed` on success, which makes
+  the pipeline rebuild its quality scheduler).  The worker's `progress` signal is
+  `qlonglong`-typed - the bundle is several GB, which overflows a Qt `int` - and
+  `_on_download_progress` carries both overloads.
 - State: `running`, `overlayCaptureMode` (read/write, runtime only — never touches `AppConfig`;
   a set emits `capture_mode_requested(bool)`; the name predates 2026-09-10, the mode now covers the
   control window too), `statusMessage` (initial value `"Ready"`), `stats` (QObject: `totalText "12.3 ms"`,

@@ -20,6 +20,18 @@ paints under the lettering.  Dirty rectangles are grown more generously so a
 crop always contains whole bubbles, and a block is dropped and re-read
 whenever a change touches its footprint (source lines or erased patch).
 
+Quality renderer (``cfg.quality_renderer == "auto"``)
+-----------------------------------------------------
+After the blocks are grouped, the free-text-over-art ones are planned into one
+inpainting job per panel (:func:`glasstranslate.render.quality.panel_jobs`) and
+handed to a :class:`~glasstranslate.render.quality.QualityScheduler`, which runs
+them in a torch-using sidecar process.  Its results arrive on that scheduler's
+thread and are only queued; the *start* of the next pass swaps each result into
+the matching live block's ``clean_patch`` and bumps ``clean_patch_serial``, so
+the overlay re-converts exactly the patches that changed.  Stale results (the
+block was re-read or dropped) are discarded.  Without a sidecar - or when it
+fails - nothing changes and the quick fill of ``render/erase.py`` stands.
+
 Threading model
 ---------------
 Everything except the constructor, :meth:`set_config`, :meth:`pause`,
@@ -34,8 +46,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -50,6 +63,7 @@ from .engines import (  # noqa: F401 - re-exported for the tests
     _default_capture_factory,
     _default_detector_factory,
     _default_ocr_factory,
+    _default_quality_factory,
     _default_translator_factory,
     _OCR_FIELDS,
     _TRANSLATOR_FIELDS,
@@ -57,6 +71,7 @@ from .engines import (  # noqa: F401 - re-exported for the tests
     _LANGUAGE_FIELDS,
     _LAYOUT_FIELDS,
     _CONTEXT_FIELDS,
+    _QUALITY_FIELDS,
 )
 from .segments import (  # noqa: F401 - re-exported for the tests
     clean_translation,
@@ -132,6 +147,11 @@ class Pipeline(threading.Thread):
             inject fakes here.  ``ocr_factory`` may take a second ``status``
             keyword (a ``StatusCallback``) to receive the OCR fallback chain's
             transition lines; ``cfg``-only factories work too.
+        quality_factory: ``(cfg, *, on_result, status) -> scheduler | None`` for the
+            quality renderer (``render/quality.py``).  The default builds one only
+            when ``cfg.quality_renderer == "auto"`` and a sidecar interpreter exists;
+            with None everything below simply never plans a job and the renderers
+            show the quick fill of ``render/erase.py``.
     """
 
     def __init__(
@@ -145,6 +165,7 @@ class Pipeline(threading.Thread):
         ocr_factory: Callable[..., OCREngine] = _default_ocr_factory,
         translator_factory: Callable[[AppConfig], Translator] = _default_translator_factory,
         detector_factory: Callable[[], LanguageDetector] = _default_detector_factory,
+        quality_factory: Callable[..., Optional[Any]] = _default_quality_factory,
     ) -> None:
         super().__init__(name="glasstranslate-pipeline", daemon=True)
         self._cfg = AppConfig.from_dict(cfg.to_dict())
@@ -156,6 +177,7 @@ class Pipeline(threading.Thread):
         self._ocr_factory = ocr_factory
         self._translator_factory = translator_factory
         self._detector_factory = detector_factory
+        self._quality_factory = quality_factory
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -186,6 +208,13 @@ class Pipeline(threading.Thread):
         self._fps = 0.0
         self._context_dirty = True  # push the series context to the (re)built translator
         self._last_translator_error: Optional[str] = None
+        # Quality renderer (render/quality.py).  The scheduler's worker thread
+        # only ever appends to ``_quality_results``; the pass drains it.
+        self._quality: Optional[Any] = None
+        self._rebuild_quality = True
+        self._quality_results: "deque[Tuple[Any, Any]]" = deque()
+        self._quality_applied = 0
+        self._last_frame_image = None
 
     # ------------------------------------------------------------- control
     @property
@@ -209,6 +238,7 @@ class Pipeline(threading.Thread):
         """
         self._stop_event.set()
         self._running.set()
+        self._stop_quality()
         if self.is_alive() and threading.current_thread() is not self:
             self.join(timeout)
         if self.is_alive() and threading.current_thread() is not self:
@@ -247,6 +277,8 @@ class Pipeline(threading.Thread):
         with self._lock:
             self._rebuild_translator = True
             self._rebuild_ocr = True
+            # Newly downloaded quality models change what the sidecar can load.
+            self._rebuild_quality = True
 
     # ---------------------------------------------------------------- loop
     def run(self) -> None:  # noqa: D401 - Thread API
@@ -277,6 +309,9 @@ class Pipeline(threading.Thread):
         Returns the stats of the pass, or None when nothing could be done
         (no region, engines still unavailable, capture returned nothing).
         """
+        # Sidecar results arrive on the scheduler's thread; they are applied
+        # here, before anything else looks at the live styles.
+        self._quality_applied += self._drain_quality()
         self._apply_pending_config()
         if not self._ensure_engines():
             return None
@@ -312,6 +347,7 @@ class Pipeline(threading.Thread):
         stats.capture_ms = timer.lap()
         if frame is None:
             return None
+        self._last_frame_image = frame.image
         offset = (frame.origin_x - region.x, frame.origin_y - region.y)
         if offset != self._frame_offset:
             # Clamping changed (e.g. the glass slid off a monitor edge); the
@@ -345,6 +381,7 @@ class Pipeline(threading.Thread):
         block_styles: Optional[List[SegmentStyle]] = None
         if self._cfg.manga_mode:
             new_segments, block_styles = self._group_blocks(frame, new_segments)
+            self._submit_quality(frame, new_segments, block_styles)
         styled = self._style_and_detect(frame, new_segments, block_styles)
         stats.style_ms = timer.lap()
 
@@ -384,6 +421,8 @@ class Pipeline(threading.Thread):
             if any(getattr(old, f) != getattr(new, f) for f in _CONTEXT_FIELDS):
                 self._context_dirty = True
                 self._invalidate_requested = True
+            if any(getattr(old, f) != getattr(new, f) for f in _QUALITY_FIELDS):
+                self._rebuild_quality = True
             if any(
                 getattr(old, f) != getattr(new, f)
                 for f in _OCR_FIELDS + _TRANSLATOR_FIELDS + _DETECTOR_FIELDS + _LANGUAGE_FIELDS + _LAYOUT_FIELDS
@@ -436,6 +475,18 @@ class Pipeline(threading.Thread):
             self._status(f"Engine error: {exc}")
             self._next_engine_attempt = time.monotonic() + _ENGINE_RETRY_S
             return False
+        # The quality renderer is optional: a failure here never stops a pass.
+        if self._rebuild_quality:
+            self._rebuild_quality = False
+            self._stop_quality()
+            try:
+                self._quality = self._quality_factory(
+                    cfg, on_result=self._on_quality_result, status=self._status
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back to the quick fill
+                log.exception("building the quality renderer failed")
+                self._status(f"Quality renderer unavailable: {exc}; using the quick fill")
+                self._quality = None
         if self._context_dirty:
             self._push_context()
         return True
@@ -471,7 +522,69 @@ class Pipeline(threading.Thread):
             return self._ocr_factory(cfg, status=self._status)
         return self._ocr_factory(cfg)
 
+    # ----------------------------------------------------------- quality renderer
+    def _stop_quality(self) -> None:
+        """Release the quality scheduler (and with it the sidecar).  Idempotent."""
+        scheduler, self._quality = self._quality, None
+        if scheduler is None:
+            return
+        try:
+            scheduler.stop()
+        except Exception:  # pragma: no cover - best effort
+            log.exception("stopping the quality renderer failed")
+        # A result the old scheduler queued before it stopped belongs to a setting that
+        # no longer applies; never swap it into the next pass.
+        self._quality_results.clear()
+
+    def _on_quality_result(self, job: Any, crop: Any) -> None:
+        """Sidecar result, **called from the scheduler's worker thread**: only queue it."""
+        self._quality_results.append((job, crop))
+
+    def _submit_quality(
+        self, frame: Frame, segments: Sequence[Segment], styles: Sequence[SegmentStyle]
+    ) -> None:
+        """Plan one inpainting job per panel of free text over art (no-op without a scheduler)."""
+        if self._quality is None or not styles:
+            return
+        from ..render.quality import panel_jobs
+
+        try:
+            jobs = panel_jobs(frame.image, [(s.text, st) for s, st in zip(segments, styles)])
+        except Exception:  # noqa: BLE001 - planning must never break a pass
+            log.exception("planning quality jobs failed")
+            return
+        if jobs:
+            self._quality.submit(jobs)
+
+    def _drain_quality(self) -> int:
+        """Apply the queued sidecar results to the live blocks; returns how many."""
+        if not self._quality_results:
+            return 0
+        from ..render.quality import block_key, composite_block_patch
+
+        applied = 0
+        while True:
+            try:
+                job, crop = self._quality_results.popleft()
+            except IndexError:
+                break
+            members = set(job.members)
+            for seg in self._live.values():
+                style = seg.style
+                if style.clean_rect is None or block_key(seg.source_text, style) not in members:
+                    continue  # stale: the block was re-read or is gone
+                try:
+                    patch = composite_block_patch(self._last_frame_image, job, crop, style)
+                except Exception:  # noqa: BLE001 - keep the quick fill for this block
+                    log.exception("compositing a quality patch failed")
+                    continue
+                style.clean_patch = patch
+                style.clean_patch_serial += 1
+                applied += 1
+        return applied
+
     def _close_engines(self) -> None:
+        self._stop_quality()
         for engine in (self._capture, self._translator):
             if engine is not None:
                 try:
@@ -684,6 +797,11 @@ class Pipeline(threading.Thread):
 
     # ------------------------------------------------------------ callbacks
     def _emit(self, stats: PipelineStats) -> None:
+        if self._quality_applied:
+            # Reported even on a skipped-unchanged pass: the overlay re-converts
+            # the upgraded patches from the bumped clean_patch_serial.
+            stats.extra["quality_patches"] = self._quality_applied
+            self._quality_applied = 0
         segments = list(self._live.values())
         dx, dy = self._frame_offset
         if dx or dy:

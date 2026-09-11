@@ -192,6 +192,19 @@ def _panel_label(labels: np.ndarray, stats: np.ndarray, src: Rect) -> int:
     return label
 
 
+def _panel_rect(stats: np.ndarray, label: int) -> Optional[Rect]:
+    """Bounding rectangle (frame coordinates) of panel component ``label``;
+    None for label 0 (no panel could be identified)."""
+    if label <= 0:
+        return None
+    return Rect(
+        int(stats[label, cv2.CC_STAT_LEFT]),
+        int(stats[label, cv2.CC_STAT_TOP]),
+        int(stats[label, cv2.CC_STAT_WIDTH]),
+        int(stats[label, cv2.CC_STAT_HEIGHT]),
+    )
+
+
 def _room(src: Rect, dx: int, dy: int, lines_wide: np.ndarray, labels: np.ndarray, panel: int, limit: int) -> int:
     """Free pixels beyond the edge of ``src`` in direction ``(dx, dy)`` (one
     of them zero) along the line through its centre, up to ``limit``: until
@@ -262,7 +275,10 @@ def prepare(img_bgr: np.ndarray, blocks: Sequence, gray: Optional[np.ndarray] = 
     """Compute, for every free-text block in ``blocks`` (``layout.TextBlock``
     objects), the data :func:`typeset_block` places with, and store it in
     the block's style: ``search_box``, ``ink_map`` and ``blocked_map``.
-    Bubble blocks are left alone (they are centred in their bubble).  Cheap:
+    Every block (bubbles included) also gets its ``panel_box``, the panel
+    component its source text sits in, which the quality renderer groups its
+    inpainting jobs by.
+    Bubble blocks are otherwise left alone (they are centred in their bubble).  Cheap:
     two morphological openings on the page plus small per-block crops.
     ``gray`` may be the page's grey image (saves a conversion)."""
     blocks = [b for b in blocks if b.style.layout_box is not None]
@@ -276,6 +292,10 @@ def prepare(img_bgr: np.ndarray, blocks: Sequence, gray: Optional[np.ndarray] = 
     separators, lines = panel_borders(gray, text_boxes)
     _, labels, stats, _ = cv2.connectedComponentsWithStats((~separators).astype(np.uint8), connectivity=4)
     panels = [_panel_label(labels, stats, b.segment.bbox) for b in blocks]
+    # The panel a block lies in is also what ``render/quality.py`` groups its
+    # inpainting jobs by, so every block gets it - bubbles included.
+    for bi, b in enumerate(blocks):
+        b.style.panel_box = _panel_rect(stats, panels[bi])
     # Lettering keeps a margin from border lines and from the page edge,
     # unless the source text itself hugs a border (a caption in a gutter):
     # then the letterer is as tight as the original was.

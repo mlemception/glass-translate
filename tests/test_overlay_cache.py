@@ -75,6 +75,26 @@ def test_caches_survive_identical_segments_and_drop_new_ones(app):
     assert glass._typesets == {} and glass._layers == {} and set(glass._patches) == {0, 1}
 
 
+def test_an_upgraded_patch_is_reconverted_and_the_lettering_is_kept(app):
+    """The quality renderer swaps ``clean_patch`` in place and bumps ``clean_patch_serial``;
+    the patch image must be rebuilt while the typeset and its layer survive."""
+    glass = O.GlassOverlay()
+    seg = _block_segment("HELLO THERE FRIEND", 60)
+    glass._apply_segments([seg])
+    _image_of(lambda p: glass._paint_block(p, glass._segments[0], 1.0, 0))
+    patch, ts, layer = glass._patches[0], glass._typesets[0], glass._layers[0]
+    # Same object, same serial: everything is reused.
+    glass._apply_segments([seg])
+    assert glass._patches[0] is patch and glass._typesets[0] is ts and glass._layers[0] is layer
+    # A sidecar result: the patch pixels changed in place and the serial went up.
+    seg.style.clean_patch = np.full_like(seg.style.clean_patch, 17)
+    seg.style.clean_patch_serial += 1
+    glass._apply_segments([seg])
+    assert glass._patches[0] is not patch
+    assert glass._typesets[0] is ts and glass._layers[0] is layer  # the lettering is untouched
+    assert QColor(glass._patches[0].pixel(5, 5)).blue() == 17
+
+
 def test_layer_blit_matches_direct_stroking(app):
     glass = O.GlassOverlay()
     seg = _block_segment("HELLO THERE FRIEND", 60)

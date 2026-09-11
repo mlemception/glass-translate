@@ -44,6 +44,10 @@ are kept by segment index; ``paintEvent`` only blits the layers.  Both
 caches survive pipeline passes that re-emit the same ``TranslatedSegment``
 objects (the frequent "nothing changed" ticks) and are dropped for a
 segment whose object changed, or when the case / font setting changes.
+The patch cache additionally keys on ``style.clean_patch_serial``, which the
+quality renderer bumps whenever it swaps an upgraded ``clean_patch`` into a
+live block: that patch is re-converted while the block's typeset and its
+lettering layer are kept.
 """
 from __future__ import annotations
 
@@ -268,6 +272,7 @@ class GlassOverlay(QWidget):
 
         self._segments: List[TranslatedSegment] = []
         self._patches: Dict[int, QImage] = {}  # clean patches of the current blocks, by index
+        self._patch_serials: Dict[int, int] = {}  # style.clean_patch_serial each cached patch was made from
         self._opacity = 0.1
         self._font_family = "Segoe UI"
         self._hide_original = True
@@ -775,6 +780,7 @@ class GlassOverlay(QWidget):
         typesets: Dict[int, Typeset] = {}
         layers: Dict[int, Tuple[QImage, int, int]] = {}
         patches: Dict[int, QImage] = {}
+        serials: Dict[int, int] = {}
         for i, seg in enumerate(new):
             j = old_index.get(id(seg))
             if j is not None:
@@ -783,10 +789,16 @@ class GlassOverlay(QWidget):
                 if j in self._layers:
                     layers[i] = self._layers[j]
             if seg.style.is_block and seg.style.clean_patch is not None:
-                reused = self._patches.get(j) if j is not None else None
+                # The quality renderer replaces a block's clean_patch in place and
+                # bumps its serial, so identity alone is not enough to reuse the
+                # converted image: the pair (segment, serial) is the cache key.
+                serial = int(seg.style.clean_patch_serial)
+                reused = self._patches.get(j) if j is not None and self._patch_serials.get(j) == serial else None
                 patches[i] = reused if reused is not None else bgr_to_qimage(seg.style.clean_patch)
+                serials[i] = serial
         self._segments = new
         self._typesets = typesets
         self._layers = layers
         self._patches = patches
+        self._patch_serials = serials
         self.update()

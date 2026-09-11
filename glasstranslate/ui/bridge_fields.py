@@ -23,6 +23,7 @@ __all__ = [
     "LANGUAGES",
     "MAX_SERIES_NAME_CHARS",
     "MAX_TEMPLATE_CHARS",
+    "QUALITY_RENDERER_ITEMS",
     "download_label",
     "download_progress",
     "format_stats",
@@ -56,6 +57,8 @@ _OCR_DEVICES = ("auto", "gpu", "cpu")
 _TRANSLATE_DEVICES = ("auto", "cuda", "cpu")
 _TRANSLATE_DEVICES_FROZEN = ("auto", "cpu")
 _ONLINE_BACKENDS = {"libretranslate", "gemini"}
+# Quality renderer (Engines page): the two modes and their menu texts.
+QUALITY_RENDERER_ITEMS: List[Tuple[str, str]] = [("off", "Off"), ("auto", "On when available")]
 CUDA_FROZEN_HINT = "CUDA is not available in the packaged build; translation runs on CPU"
 # Series context (F5): caps mirror glasstranslate.translate.context (imported lazily by the coercers).
 MAX_SERIES_NAME_CHARS = 80
@@ -149,6 +152,13 @@ def _capped_text(limit: int) -> Callable[[Any], str]:
     return coerce
 
 
+def _quality_mode(v: Any) -> str:
+    """"off" | "auto"; anything else (a hand-edited config, a stale QML value) is "off"."""
+    from ..config.settings import normalize_quality_renderer
+
+    return normalize_quality_renderer(v)
+
+
 def _timeout(v: Any) -> float:
     return min(300.0, max(1.0, float(v)))
 
@@ -175,6 +185,7 @@ _CONFIG_FIELDS: Dict[str, _Field] = {
     "apiUrl": _Field("translation_api_url", _strip),
     "apiKey": _Field("translation_api_key", _strip),
     "modelsDir": _Field("models_dir", _strip),
+    "qualityRenderer": _Field("quality_renderer", _quality_mode),
     "geminiModel": _Field("gemini_model", _strip),
     "geminiApiFormat": _Field("gemini_api_format", str),
     "geminiBaseUrl": _Field("gemini_base_url", _strip),

@@ -248,6 +248,12 @@ def _download_one(
         raise
 
 
+# Public names for the quality-renderer store (render/quality_models.py), which downloads its
+# files with exactly this streaming / verifying / atomic-rename logic.
+download_one = _download_one
+validate_name = _validate_name
+
+
 def _remove_quietly(path: Path) -> None:
     try:
         if path.exists():

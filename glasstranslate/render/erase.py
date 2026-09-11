@@ -35,12 +35,16 @@ side for horizontal script):
    background*: exact paper colour on paper, the local mean grey on a
    screentone, so neither white blotches nor grey smears appear.  Near-paper
    JPEG ringing in a ring around the erase set is flattened on paper.
-6. **Bubbles** - inside a detected bubble the paper component around the text
-   is painted with the paper colour, the outline component is protected, and
-   glyph completion adds stray glyphs.
+6. **Bubbles** are redrawn, never inpainted: the paper interior (the paper
+   component holding the text, every enclosed glyph, furigana mark or stray
+   filled in) is painted with the paper colour, clipped to the outline; the
+   outline and its anti-aliased fringe are copied from the source, so it keeps
+   its own thickness and its tail.  Nothing outside the outline changes.
 
-Public API: :func:`apply` (whole page, in place on the block styles) and
-:func:`erase_block` (one block -> ``(patch, rect, outline)``).
+Public API: :func:`apply` (whole page, in place on the block styles),
+:func:`erase_block` (one block -> ``(patch, rect, outline)``) and
+:func:`erase_block_masked` (the same plus the glyph mask that was painted
+over, which the quality renderer of ``render/quality.py`` regenerates).
 """
 from __future__ import annotations
 
@@ -99,6 +103,11 @@ TONE_DOT = 4  # px: ink components up to this size are screentone dots and count
 TONE_TOL = 12  # grey levels: a local background this close to the paper colour is paper
 TONE_MIN_SAMPLES = 0.1  # fraction of the estimate's square that must be background to trust the mean
 PAPER_TOL = 45  # grey levels from the paper colour that still count as paper (bubbles)
+OUTLINE_MIN = 0.35  # bubbles: an ink component at least this fraction of the window's short side may be the outline
+OUTLINE_FRINGE = 1  # px of anti-aliased edge kept with a bubble outline
+# Bubbles: the paper fill reaches this many glyphs beyond the text boxes (strays and furigana
+# next to the column are filled; art drawn across the balloon farther away is kept).
+BUBBLE_ZONE_EM = 1.5
 OUTLINE_REACH = 0.3  # glyphs around the source footprint checked for remaining art
 OUTLINE_MIN_INK = 40  # kept ink pixels in that area that make the block "over art"
 WINDOW_ALONG = 0.5  # window margin along the reading axis beyond the sweep reach (glyphs)
@@ -738,19 +747,45 @@ def _analyse_open(ctx: _Ctx) -> _Analysis:
     return _Analysis(erase_d, kept, ring, fill)
 
 
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """``mask`` with every enclosed hole filled (components of the complement
+    that do not touch the window border)."""
+    inv = (~mask).astype(np.uint8)
+    n, labels = cv2.connectedComponents(inv, connectivity=4)
+    open_to_border = np.zeros(n, dtype=bool)
+    open_to_border[0] = True
+    for edge in (labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]):
+        open_to_border[np.unique(edge)] = True
+    return mask | ~open_to_border[labels]
+
+
 def _analyse_bubble(ctx: _Ctx) -> _Analysis:
+    """Redraw the bubble: its paper interior (the paper component holding the
+    text, as ``layout.py`` finds it, with every enclosed glyph, furigana, stray
+    mark or hole filled) is painted with the paper colour, clipped to the
+    outline.  The outline - the large ink components bordering the interior
+    from outside, tails included - and its ``OUTLINE_FRINGE`` px anti-aliased
+    edge are copied from the source untouched, so it keeps its own thickness.
+    Nothing outside the outline is touched, and nothing farther than
+    ``BUBBLE_ZONE_EM`` glyphs from the text boxes either: a character drawn across
+    the balloon's edge (4ja: a chibi whose head reaches into the balloon) is art,
+    not a stray glyph, and stays."""
     gray = ctx.gray
     h, w = gray.shape
     ink = _ink_mask(gray, ctx.fg_l, ctx.bg_l)
     comps = _Components(ink)
-    protected = comps.mask_of(comps.border)  # the outline and anything joined to the outside
-    sel, _amb, pool, pieces, own = _classify(ctx, comps)
-    _complete(ctx, comps, ink, sel, pool, pieces, own)
+    own = _paint((h, w), ctx.main + ctx.furi, PAD)
+    zone_pad = max(PAD, int(round(BUBBLE_ZONE_EM * max(ctx.glyph, 1.0))))
+    zone = _paint((h, w), ctx.main + ctx.furi, zone_pad).astype(bool)
+    big = comps.maxdim >= OUTLINE_MIN * min(h, w)
+    big[0] = False
+    big_mask = comps.mask_of(big)
 
-    # Paper component the text sits on (text boxes painted over, outline kept).
+    # Paper component the text sits on: text boxes painted over (glyphs count as
+    # paper), but never the outline, even where a box overlaps it.
     paper = (np.abs(gray.astype(np.int16) - ctx.bg_l) <= PAPER_TOL).astype(np.uint8)
     paper[own > 0] = 1
-    paper[protected] = 0
+    paper[big_mask] = 0
     _, plabels = cv2.connectedComponents(paper, connectivity=4)
     label = 0
     for box in ctx.main + ctx.furi:
@@ -759,16 +794,15 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
         label = int(plabels[cy, cx])
         if label:
             break
-    paper_comp = (plabels == label) if label else own.astype(bool)
+    interior = _fill_holes(plabels == label) if label else own.astype(bool)
 
-    text = _dilate(comps.mask_of(sel), ERASE_DILATE)
-    region = _bbox(text | own.astype(bool))
-    erase = np.zeros((h, w), dtype=bool)
-    if region is not None:
-        region = _grow(region, RECT_PAD, RECT_PAD, w, h)
-        erase[region.y : region.y2, region.x : region.x2] = True
-        erase &= text | paper_comp
-    erase &= ~_dilate(protected, 1)
+    # The outline: big ink components that border the interior mostly from
+    # outside (a big glyph enclosed by the interior lies inside it entirely).
+    adjacent = np.zeros(comps.n, dtype=bool)
+    adjacent[np.unique(comps.labels[_dilate(interior, 1) & (ink > 0)])] = True
+    inside = _fraction_inside(comps.labels, interior.view(np.uint8), comps.area)
+    outline = comps.mask_of(adjacent & big & (inside < 0.5))
+    erase = interior & zone & ~_dilate(outline, OUTLINE_FRINGE)
     kept = ink.astype(bool) & ~erase
     empty = np.zeros((h, w), dtype=bool)
     return _Analysis(erase, kept, empty, None)
@@ -779,6 +813,11 @@ def _boxes(block: TextBlock) -> Tuple[List[Rect], List[Rect]]:
     return [m.bbox for m in block.members], [f.bbox for f in block.furigana]
 
 
+def _no_mask(rect: Rect) -> np.ndarray:
+    """All-False glyph mask for a patch that erased nothing."""
+    return np.zeros((max(0, rect.h), max(0, rect.w)), dtype=bool)
+
+
 def erase_block(
     img_bgr: np.ndarray,
     block: TextBlock,
@@ -786,15 +825,34 @@ def erase_block(
     foreign: Sequence[Rect] = (),
     glyph: Optional[float] = None,
 ) -> Tuple[np.ndarray, Rect, bool]:
+    """Erase the source glyphs of ``block``: ``(patch, rect, outline)``.
+
+    See :func:`erase_block_masked`, of which this is the three-value form kept
+    for every existing caller.
+    """
+    patch, rect, outline, _mask = erase_block_masked(img_bgr, block, gray, foreign, glyph)
+    return patch, rect, outline
+
+
+def erase_block_masked(
+    img_bgr: np.ndarray,
+    block: TextBlock,
+    gray: Optional[np.ndarray] = None,
+    foreign: Sequence[Rect] = (),
+    glyph: Optional[float] = None,
+) -> Tuple[np.ndarray, Rect, bool, np.ndarray]:
     """Erase the source glyphs of ``block``.
 
-    Returns ``(patch, rect, outline)``: ``patch`` is a BGR copy of ``rect``
-    (frame coordinates) with the glyphs removed, ``outline`` tells whether
-    ink or screentone remains under/near the text footprint (the renderer
-    then draws the translation with a halo).  ``gray`` may be the page's grey
-    image (saves a conversion); ``foreign`` are the OCR boxes of the other
-    blocks, which are never erased; ``glyph`` overrides the block's glyph
-    size (``style.text_height_px``).
+    Returns ``(patch, rect, outline, mask)``: ``patch`` is a BGR copy of
+    ``rect`` (frame coordinates) with the glyphs removed, ``outline`` tells
+    whether ink or screentone remains under/near the text footprint (the
+    renderer then draws the translation with a halo), and ``mask`` is the bool
+    array of ``rect``'s shape flagging the pixels that were painted over -
+    the glyph classification the quality renderer regenerates
+    (``render/quality.py``).  ``gray`` may be the page's grey image (saves a
+    conversion); ``foreign`` are the OCR boxes of the other blocks, which are
+    never erased; ``glyph`` overrides the block's glyph size
+    (``style.text_height_px``).
     """
     height, width = img_bgr.shape[:2]
     if gray is None:
@@ -821,7 +879,7 @@ def erase_block(
         win = _grow(source, across if vertical else along, along if vertical else across, width, height)
     if win.w <= 0 or win.h <= 0:
         rect = _grow(source, PAD + 1, PAD + 1, width, height)
-        return img_bgr[rect.y : rect.y2, rect.x : rect.x2].copy(), rect, False
+        return img_bgr[rect.y : rect.y2, rect.x : rect.x2].copy(), rect, False, _no_mask(rect)
 
     gray_w = gray[win.y : win.y2, win.x : win.x2]
 
@@ -857,9 +915,9 @@ def erase_block(
     box = _bbox(erase)
     if box is None:
         rect = _grow(source, PAD + 1, PAD + 1, width, height)
-        return img_bgr[rect.y : rect.y2, rect.x : rect.x2].copy(), rect, outline
+        return img_bgr[rect.y : rect.y2, rect.x : rect.x2].copy(), rect, outline, _no_mask(rect)
 
-    local_rect = _grow(box, RECT_PAD + RING, RECT_PAD + RING, win.w, win.h)
+    local_rect = _grow(box, RECT_PAD + (0 if bubble else RING), RECT_PAD + (0 if bubble else RING), win.w, win.h)
     sl = (slice(local_rect.y, local_rect.y2), slice(local_rect.x, local_rect.x2))
     rect = Rect(local_rect.x + win.x, local_rect.y + win.y, local_rect.w, local_rect.h)
     patch = img_bgr[rect.y : rect.y2, rect.x : rect.x2].copy()
@@ -871,16 +929,17 @@ def erase_block(
     else:
         scale = fill[sl][erase_l][:, None] / max(bg_l, 1.0)
         patch[erase_l] = np.clip(bg_bgr[None, :].astype(np.float32) * scale + 0.5, 0, 255).astype(np.uint8)
-    return patch, rect, outline
+    return patch, rect, outline, np.ascontiguousarray(erase_l)
 
 
 def apply(
     img_bgr: np.ndarray, blocks: List[TextBlock], all_segments: Sequence[Segment] = (), gray: Optional[np.ndarray] = None
 ) -> None:
-    """Recompute ``clean_patch``, ``clean_rect`` and ``outline`` of every
-    block in place.  ``all_segments`` (the raw OCR lines of any confidence)
-    is accepted for interface compatibility; glyph completion works from the
-    ink alone.  ``gray`` may be the page's grey image (saves a conversion)."""
+    """Recompute ``clean_patch``, ``clean_rect``, ``outline`` and
+    ``erase_mask`` of every block in place.  ``all_segments`` (the raw OCR
+    lines of any confidence) is accepted for interface compatibility; glyph
+    completion works from the ink alone.  ``gray`` may be the page's grey
+    image (saves a conversion)."""
     del all_segments
     if not blocks:
         return
@@ -896,7 +955,8 @@ def apply(
         g = b.style.text_height_px
         if len(blocks) >= 3:
             g = min(g, GLYPH_CAP * median)
-        patch, rect, outline = erase_block(img_bgr, b, gray=gray, foreign=foreign, glyph=g)
+        patch, rect, outline, mask = erase_block_masked(img_bgr, b, gray=gray, foreign=foreign, glyph=g)
         b.style.clean_patch = patch
         b.style.clean_rect = rect
         b.style.outline = outline
+        b.style.erase_mask = mask

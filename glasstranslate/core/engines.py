@@ -30,6 +30,9 @@ _TRANSLATOR_FIELDS = (
     "gemini_max_retries",
 )
 _DETECTOR_FIELDS = ("tile_size", "change_threshold")
+# Quality renderer: the mode, the optional explicit interpreter and the models dir
+# (the sidecar is launched with ``--models-dir``), so a change relaunches it.
+_QUALITY_FIELDS = ("quality_renderer", "quality_sidecar_python", "models_dir")
 _LANGUAGE_FIELDS = ("source_lang", "target_lang")
 _LAYOUT_FIELDS = ("manga_mode",)
 # Series context: pushed to the translator without rebuilding it; the cache key carries the
@@ -73,3 +76,36 @@ def _default_detector_factory() -> LanguageDetector:
     from ..ocr import ScriptLanguageDetector
 
     return ScriptLanguageDetector()
+
+
+def _default_quality_factory(cfg: AppConfig, *, on_result: Callable[..., None],
+                             status: StatusCallback) -> Optional[object]:
+    """A :class:`~glasstranslate.render.quality.QualityScheduler`, or None.
+
+    None - the pipeline then never plans a quality job and the quick fill of
+    ``render/erase.py`` is what the renderers show - whenever the setting is
+    not ``"auto"``, no sidecar interpreter can be found, or the model store is
+    incomplete (the pipeline rebuilds the factory on ``models_dir`` changes and
+    after ``refresh_models()``, so a finished download is picked up without a
+    restart).  The sidecar itself is only started by the scheduler's worker, on
+    the first job.
+    """
+    if str(getattr(cfg, "quality_renderer", "off") or "off").strip().lower() != "auto":
+        return None
+    from ..render.quality import QualityClient, QualityScheduler, find_sidecar_python
+    from ..render.quality_models import models_ready
+
+    python = find_sidecar_python(cfg)
+    if python is None:
+        return None
+    models_dir = cfg.models_dir
+    if not models_ready(models_dir):
+        # Without this gate the worker would spawn a torch process, watch its first job fail
+        # with "model missing" and retry every back-off period for the whole session.
+        status("Quality renderer: models not downloaded (Engines page); using the quick fill")
+        return None
+    return QualityScheduler(
+        lambda: QualityClient(python, models_dir),
+        on_result=on_result,
+        status=status,
+    )

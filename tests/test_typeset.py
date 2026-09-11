@@ -257,6 +257,12 @@ def test_prepare_builds_maps_from_an_image():
     if sb.y2 > 250:
         assert style.blocked_map[250 - sb.y, 250 - sb.x]
     assert not style.blocked_map[src.y - sb.y + 5, src.x - sb.x + 5]
+    # The panel the block sits in is exported for the quality renderer: the upper
+    # half of the page, never crossing the gutter line.
+    panel = style.panel_box
+    assert panel is not None
+    assert panel.y2 <= 200 and panel.y <= src.y and panel.y2 >= src.y2
+    assert panel.w > 300
 
 
 # ------------------------------------------------------------ hyphenation and balance

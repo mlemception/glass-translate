@@ -51,6 +51,17 @@ def default_models_dir() -> Path:
     return project_root() / "models"
 
 
+# Quality renderer (render/quality.py): "off" = never launch the sidecar,
+# "auto" = launch it when an interpreter for it can be found.
+QUALITY_RENDERER_MODES = ("off", "auto")
+
+
+def normalize_quality_renderer(value: object) -> str:
+    """Coerce a stored / typed quality-renderer mode to a known one ("off" otherwise)."""
+    text = str(value or "").strip().lower()
+    return text if text in QUALITY_RENDERER_MODES else QUALITY_RENDERER_MODES[0]
+
+
 @dataclass
 class Hotkeys:
     toggle_grab: str = "<ctrl>+<alt>+g"
@@ -92,6 +103,11 @@ class AppConfig:
     # system-prompt template with the [Series Name] placeholder; "" = the built-in template.
     series_name: str = ""
     series_prompt_template: str = ""
+    # Quality renderer (generative fill of free text over artwork, run by the
+    # torch-using sidecar in ``renderer/``): "off" | "auto".  The optional
+    # interpreter path overrides the lookup in ``render/quality.find_sidecar_python``.
+    quality_renderer: str = "off"
+    quality_sidecar_python: str = ""
     # overlay
     overlay_opacity: float = 0.10  # background alpha, 0..1
     hide_original: bool = True  # paint bg-colored box under translation
@@ -165,4 +181,8 @@ class AppConfig:
                 setattr(cfg, f.name, v)
             # Values of the wrong type are ignored so a hand-edited config
             # cannot put the app into an inconsistent state.
+        # Enum-valued fields are normalised rather than trusted: an unknown
+        # quality-renderer mode must never launch a sidecar.
+        cfg.quality_renderer = normalize_quality_renderer(cfg.quality_renderer)
+        cfg.quality_sidecar_python = str(cfg.quality_sidecar_python or "").strip()
         return cfg

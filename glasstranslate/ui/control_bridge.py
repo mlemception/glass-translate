@@ -22,6 +22,7 @@ from .bridge_fields import (
     _TRANSLATE_DEVICES_FROZEN,
     CUDA_FROZEN_HINT,
     LANGUAGES,
+    QUALITY_RENDERER_ITEMS,
     _cfg_get,
     _cfg_set,
     _config_property,
@@ -31,7 +32,7 @@ from .bridge_fields import (
     is_frozen,
     translate_device_items,
 )
-from .download_workers import MangaOcrDownloadWorker, ModelDownloadWorker
+from .download_workers import MangaOcrDownloadWorker, ModelDownloadWorker, QualityModelsDownloadWorker
 from .glass import win32
 from .glass.appearance import Appearance
 from .glass.backdrop import BackdropFrame, InkPolarity, LumaSmoother
@@ -89,6 +90,8 @@ class ControlBridge(QObject):
     apiUrlChanged = Signal()
     apiKeyChanged = Signal()
     modelsDirChanged = Signal()
+    qualityRendererChanged = Signal()
+    qualityChanged = Signal()  # the quality card's derived hint / models-ready flag
     overlayOpacityChanged = Signal()
     fontFamilyChanged = Signal()
     hideOriginalChanged = Signal()
@@ -168,6 +171,8 @@ class ControlBridge(QObject):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(_SAVE_DEBOUNCE_MS)
         self._save_timer.timeout.connect(self.save_now)
+        # The quality card's hint follows the download row (the models may have just landed).
+        self.downloadChanged.connect(self.qualityChanged)
         if appearance is not None:
             appearance.changed.connect(self.appearance_changed)
 
@@ -190,6 +195,7 @@ class ControlBridge(QObject):
                 getattr(self, name + "Changed").emit()
             self.listsChanged.emit()
             self.backendFlagsChanged.emit()
+            self.qualityChanged.emit()
         finally:
             self._loading = False
             self.loadingChanged.emit()
@@ -297,6 +303,8 @@ class ControlBridge(QObject):
             return _TRANSLATE_DEVICES_FROZEN if is_frozen() else _TRANSLATE_DEVICES
         if name == "fontFamily":
             return self._font_families_base()
+        if name == "qualityRenderer":
+            return [value for value, _ in QUALITY_RENDERER_ITEMS]
         return None
 
     def _set_config(self, name: str, value: Any) -> None:
@@ -316,6 +324,8 @@ class ControlBridge(QObject):
         getattr(self, name + "Changed").emit()
         if name == "translationBackend":
             self.backendFlagsChanged.emit()
+        if name in ("qualityRenderer", "modelsDir"):
+            self.qualityChanged.emit()
         base = self._base_values(name)
         if base is not None and value not in base:
             self.listsChanged.emit()
@@ -339,6 +349,7 @@ class ControlBridge(QObject):
     apiUrl = _config_property("apiUrl", str, apiUrlChanged)
     apiKey = _config_property("apiKey", str, apiKeyChanged)
     modelsDir = _config_property("modelsDir", str, modelsDirChanged)
+    qualityRenderer = _config_property("qualityRenderer", str, qualityRendererChanged)
     overlayOpacity = _config_property("overlayOpacity", float, overlayOpacityChanged)
     fontFamily = _config_property("fontFamily", str, fontFamilyChanged)
     hideOriginal = _config_property("hideOriginal", bool, hideOriginalChanged)
@@ -608,6 +619,57 @@ class ControlBridge(QObject):
 
     mangaOcrModelsReady = Property(bool, _manga_ocr_models_ready, notify=downloadChanged)
 
+    # --------------------------------------------------------------- quality renderer
+    def _quality_renderer_options(self) -> List[Dict[str, str]]:
+        return _items(QUALITY_RENDERER_ITEMS, self._cfg.quality_renderer)
+
+    def _quality_models_ready(self) -> bool:
+        from ..render.quality_models import models_ready
+
+        return bool(models_ready(self._cfg.models_dir))
+
+    def _quality_status(self) -> str:
+        """The card's hint: Off / no sidecar / no models (with the size) / Ready."""
+        from ..render.quality import find_sidecar_python
+        from ..render.quality_models import size_label
+
+        if self._cfg.quality_renderer != "auto":
+            return "Off"
+        if find_sidecar_python(self._cfg) is None:
+            return "Sidecar not installed - run renderer\\install.bat"
+        if not self._quality_models_ready():
+            return f"Models not downloaded ({size_label()})"
+        return "Ready"
+
+    qualityRendererOptions = Property("QVariantList", _quality_renderer_options, notify=listsChanged)
+    qualityModelsReady = Property(bool, _quality_models_ready, notify=qualityChanged)
+    qualityStatus = Property(str, _quality_status, notify=qualityChanged)
+
+    @Slot()
+    def downloadQualityModels(self) -> None:
+        """Fetch the quality renderer's models into the models dir; shares the progress row."""
+        if self._download_active():
+            self.show_status("A download is already running.")
+            return
+        worker = QualityModelsDownloadWorker(self._cfg.models_dir.strip() or self._cfg.models_dir, self)
+        self._download_worker = worker
+        self._download_base_label = "quality renderer models"
+        self._download_label = "Downloading quality renderer models…"
+        self._download_progress = -1
+        self._download_visible = True
+        worker.progress.connect(self._on_download_progress)
+        worker.finished_ok.connect(self._on_quality_models_ok)
+        worker.failed.connect(self._on_download_failed)
+        worker.start()
+        self.downloadChanged.emit()
+
+    @Slot(str)
+    def _on_quality_models_ok(self, path: str) -> None:
+        self._download_visible = False
+        self.downloadChanged.emit()
+        self.show_status(f"Quality renderer models installed at {path}")
+        self.models_changed.emit()
+
     @Slot(str)
     def _on_manga_ocr_ok(self, path: str) -> None:
         self._download_visible = False
@@ -623,6 +685,7 @@ class ControlBridge(QObject):
             self.downloadChanged.emit()
 
     @Slot(int, int)
+    @Slot("qlonglong", "qlonglong")  # the quality bundle is several GB: an int would overflow
     def _on_download_progress(self, done: int, total: int) -> None:
         self._download_label, self._download_progress = download_progress(self._download_base_label, done, total)
         self.downloadChanged.emit()

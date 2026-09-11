@@ -350,6 +350,60 @@ def test_manga_ocr_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert bridge.statusMessage.startswith("Download failed: sha256 mismatch")
 
 
+def test_quality_renderer_round_trip_and_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Engines card's combo edits the config and the hint follows the sidecar / model state."""
+    bridge, cfg, fired = _bridge(tmp_path, AppConfig(models_dir=str(tmp_path / "m")))
+    assert bridge.qualityRenderer == "off" and bridge.qualityStatus == "Off"
+    assert [item["value"] for item in bridge.qualityRendererOptions] == ["off", "auto"]
+    bridge.qualityRenderer = "auto"
+    assert cfg.quality_renderer == "auto" and len(fired) == 1
+    bridge.qualityRenderer = "nonsense"  # coerced back to "off" by the field's normaliser
+    assert cfg.quality_renderer == "off"
+    # "auto" without an installed sidecar: the hint says how to install it.
+    bridge.qualityRenderer = "auto"
+    monkeypatch.setattr(CB, "QualityModelsDownloadWorker", _FakeWorker)
+    from glasstranslate.render import quality as Q
+
+    monkeypatch.setattr(Q, "find_sidecar_python", lambda cfg: None)
+    assert "install.bat" in bridge.qualityStatus
+    monkeypatch.setattr(Q, "find_sidecar_python", lambda cfg: Path(sys.executable))
+    assert bridge.qualityModelsReady is False
+    assert bridge.qualityStatus.startswith("Models not downloaded (")
+
+
+def test_quality_models_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(CB, "QualityModelsDownloadWorker", _FakeWorker)
+    _FakeWorker.instances.clear()
+    bridge, _, _ = _bridge(tmp_path, AppConfig(models_dir=str(tmp_path / "m")))
+    models_changed: List[int] = []
+    bridge.models_changed.connect(lambda: models_changed.append(1))
+    bridge.downloadQualityModels()
+    worker = _FakeWorker.instances[-1]
+    assert worker.args[0] == str(tmp_path / "m")
+    assert bridge.downloadActive and bridge.downloadVisible and "quality" in bridge.downloadLabel
+    bridge.downloadQualityModels()
+    assert bridge.statusMessage == "A download is already running." and len(_FakeWorker.instances) == 1
+    worker.progress.emit(1_000_000_000, 2_000_000_000)
+    assert bridge.downloadProgress == 50
+    worker.finish(str(tmp_path / "m" / "quality"))
+    assert not bridge.downloadActive and models_changed == [1]
+    assert "Quality renderer models installed" in bridge.statusMessage
+    bridge.downloadQualityModels()
+    _FakeWorker.instances[-1].fail("no quality model table is bundled with this build")
+    assert bridge.statusMessage.startswith("Download failed: no quality model table")
+
+
+def test_quality_progress_survives_a_multi_gigabyte_total(tmp_path: Path) -> None:
+    """The quality bundle is several GB: a Qt ``int`` signal would overflow at 2.1 GB."""
+    bridge, _, _ = _bridge(tmp_path)
+    worker = C.QualityModelsDownloadWorker(str(tmp_path))
+    worker.progress.connect(bridge._on_download_progress)
+    bridge._download_base_label = "quality renderer models"
+    worker.progress.emit(3_500_000_000, 7_000_000_000)
+    assert bridge.downloadProgress == 50
+    assert bridge.downloadLabel == "Downloading quality renderer models: 3500.0 / 7000.0 MB"
+
+
 def test_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(CB, "ModelDownloadWorker", _FakeWorker)
     _FakeWorker.instances.clear()

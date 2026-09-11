@@ -41,7 +41,11 @@ from .bridge_fields import (  # noqa: F401 - re-exported for tests and app.py
 )
 from .control_bridge import ControlBridge, WINDOW_TITLE  # noqa: F401
 from .control_window import ControlWindow, MAIN_QML_URL, WINDOW_DEFAULT_SIZE, WINDOW_FLAGS  # noqa: F401
-from .download_workers import MangaOcrDownloadWorker, ModelDownloadWorker  # noqa: F401 - re-exported
+from .download_workers import (  # noqa: F401 - re-exported
+    MangaOcrDownloadWorker,
+    ModelDownloadWorker,
+    QualityModelsDownloadWorker,
+)
 from .resources_guard import RESOURCES_OK, _ensure_resources  # noqa: F401
 from .stats_model import StatsModel  # noqa: F401
 
@@ -57,6 +61,7 @@ __all__ = [
     "ControlWindow",
     "MangaOcrDownloadWorker",
     "ModelDownloadWorker",
+    "QualityModelsDownloadWorker",
     "StatsModel",
     "_ensure_resources",
     "download_label",

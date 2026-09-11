@@ -258,6 +258,25 @@ def test_engines_page_gemini_card_follows_backend(window: C.ControlWindow, qapp)
     assert _qml_value(model_field, "placeholder") == "gemini-3.8-flash"
 
 
+def test_engines_page_has_the_quality_renderer_card(window: C.ControlWindow, qapp) -> None:
+    """The quality-renderer card: mode combo, status hint and the download button."""
+    root = window.rootObject()
+    root.findChild(QQuickItem, "tabBar").setProperty("currentIndex", 2)
+    qapp.processEvents()
+    card = root.findChild(QQuickItem, "qualityCard")
+    combo = root.findChild(QQuickItem, "qualityRendererCombo")
+    button = root.findChild(QQuickItem, "qualityDownloadButton")
+    assert card is not None and combo is not None and button is not None
+    assert _qml_value(combo, "value") == "off"
+    assert _qml_value(card, "bridge.qualityStatus") == "Off"
+    assert _qml_value(button, "enabled") is True  # no download running
+    assert "Download quality models" in str(_qml_value(button, "text"))
+    window.bridge.qualityRenderer = "auto"
+    qapp.processEvents()
+    assert _qml_value(combo, "value") == "auto"
+    assert window.config.quality_renderer == "auto"
+
+
 def test_translate_page_has_series_field_and_engines_page_template_editor(window: C.ControlWindow, qapp) -> None:
     """F5: quick series name on the main tab, the full template editor on the Engines tab."""
     root = window.rootObject()

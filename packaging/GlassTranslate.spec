@@ -50,6 +50,8 @@ EXCLUDES += [
     "PySide6.QtAsyncio", "PySide6.support", "PySide6.scripts",
     # optional ML engines rapidocr probes for: keep excluded so a future install never bloats the exe
     "torch", "torchvision", "openvino", "paddle", "tensorrt", "MNN", "cupy", "onnx", "onnxsim",
+    # the quality-renderer sidecar and its stack live in renderer/.venv, never in the exe
+    "glassrenderer", "diffusers", "transformers", "safetensors", "accelerate",
     # big, clearly unused stdlib / third-party packages
     "tkinter", "unittest", "pydoc", "doctest", "xmlrpc", "sqlite3", "test", "curses",
     "matplotlib", "scipy", "pandas", "IPython", "setuptools", "pkg_resources",
@@ -83,7 +85,13 @@ extra_hidden = ["mss.windows", "comtypes.gen", "dxcam.processor.numpy_processor"
                 "glasstranslate.ui.resources_rc",
                 "glasstranslate.ocr.mangaocr", "glasstranslate.ocr.models", "glasstranslate.ocr.chain",
                 "glasstranslate.ocr.furigana", "glasstranslate.translate.gemini", "glasstranslate.translate.context",
-                "glasstranslate.config.secrets", "requests", "certifi", "jaconv"]
+                "glasstranslate.config.secrets", "requests", "certifi", "jaconv",
+                # quality renderer: imported lazily by core/engines.py and control_bridge.py
+                "glasstranslate.render.quality", "glasstranslate.render.quality_models"]
+# The quality-renderer model table is a data file next to its module (it is shared with the
+# sidecar); the models themselves are downloaded into %LOCALAPPDATA%, never bundled.
+_quality_table = os.path.join(ROOT, "glasstranslate", "render", "quality_models.json")
+quality_datas = [(_quality_table, "glasstranslate/render")] if os.path.isfile(_quality_table) else []
 # manga-ocr models are NEVER bundled: they are downloaded on first use into %LOCALAPPDATA%/GlassTranslate/models.
 # Bundle-root marker: run.py sweeps stale %TEMP%\_MEI* dirs that contain it (onefile lifecycle, section 6).
 marker_datas = [(os.path.join(PACKAGING, "gt_bundle.marker"), ".")]
@@ -92,7 +100,8 @@ a = Analysis(  # noqa: F821
     [ENTRY],
     pathex=[ROOT],
     binaries=ctranslate2_bins,
-    datas=rapidocr_datas + sentencepiece_datas + py3langid_datas + certifi_datas + marker_datas,
+    datas=rapidocr_datas + sentencepiece_datas + py3langid_datas + certifi_datas + marker_datas
+    + quality_datas,
     hiddenimports=SHIBOKEN_RUNTIME_STDLIB + rapidocr_hidden + extra_hidden,
     hookspath=[],
     runtime_hooks=[],
@@ -125,6 +134,9 @@ PLUGIN_KEEP = {
 # download, Gemini, LibreTranslate over https).  Caught by smoke run D on 2026-09-10; run A now asserts ssl_ok.
 PYSIDE_DROP = re.compile(r"^(opengl32sw|libcrypto-3[^\/]*|libssl-3[^\/]*|av(codec|format|util)-\d+|sw(scale|resample)-\d+)\.dll$", re.I)
 NON_QT_DROP = re.compile(r"^(opengl32sw|av(codec|format|util)-\d+|sw(scale|resample)-\d+)\.dll$", re.I)
+# The quality-renderer sidecar (renderer/, package glassrenderer, its own torch venv) is NEVER
+# collected into the exe: it is installed separately by renderer/install.bat.
+SIDECAR_DROP = re.compile(r"^(renderer/|glassrenderer([/.]|$))", re.I)
 DEPS_DROP = re.compile(
     r"(^|[\\/])(opencv_videoio_ffmpeg\d+_64\.dll|cv2[\\/]data[\\/].*|PIL[\\/]_avif[^\\/]*\.pyd|PIL[\\/]_imagingtk[^\\/]*\.pyd"
     r"|onnxruntime[\\/](datasets|tools)[\\/].*|nvidia[\\/].*|ctranslate2[\\/]cudnn64_9\.dll)$",
@@ -136,6 +148,8 @@ def keep(entry):
     """Allowlist filter for one TOC entry ``(dest, src, typecode)``."""
     dest = entry[0].replace("\\", "/")
     if DEPS_DROP.search(dest):
+        return False
+    if SIDECAR_DROP.match(dest):
         return False
     if dest.startswith("PySide6/"):
         rel = dest[len("PySide6/"):]

@@ -10,7 +10,9 @@ import ".."
     Download model / Get Sugoi - enabled iff argos and no download running, the
     inline progress row with Hide); card "Gemini" (visible iff gemini: model,
     API format, base URL, timeout, retries, write-only API key kept in the user
-    secret store); card "Series context" (the editable system-prompt template
+    secret store); card "Quality renderer" (mode off / on-when-available, the
+    sidecar status hint, Download quality models… through the same progress
+    row); card "Series context" (the editable system-prompt template
     with the [Series Name] placeholder, Reset to default); card "Pipeline"
     (refresh rate, debounce, min OCR confidence steppers).
 */
@@ -298,6 +300,32 @@ Flickable {
                     decimals: 0
                     number: bridge.geminiMaxRetries
                     onCommitted: function (v) { bridge.geminiMaxRetries = v }
+                }
+            }
+        }
+
+        GlassCard {
+            objectName: "qualityCard"
+            title: "Quality renderer"
+            FormRow {
+                label: "Mode"
+                hint: bridge.qualityStatus
+                GlassComboBox {
+                    objectName: "qualityRendererCombo"
+                    model: bridge.qualityRendererOptions
+                    value: bridge.qualityRenderer
+                    onSelected: function (v) { bridge.qualityRenderer = v }
+                }
+            }
+            FormRow {
+                label: "Quality models"
+                hint: "Free text over artwork is redrawn by a separate local process (renderer\\install.bat) instead of the quick fill. Bubbles are always redrawn; nothing leaves this machine."
+                stretch: false
+                GlassButton {
+                    objectName: "qualityDownloadButton"
+                    text: "Download quality models…"
+                    enabled: !bridge.downloadActive
+                    onClicked: bridge.downloadQualityModels()
                 }
             }
         }

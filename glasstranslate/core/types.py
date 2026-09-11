@@ -138,6 +138,20 @@ class SegmentStyle:
     # panels, other blocks' text / bubbles (with a margin) and the half of the
     # gap between neighbouring blocks that belongs to the neighbour.
     blocked_map: Optional[np.ndarray] = None
+    # --- quality renderer (optional, see ``render/quality.py``) --------------
+    # Bool mask of shape (clean_rect.h, clean_rect.w): the pixels the eraser
+    # classified as glyph and painted over.  It is the inpainting mask the
+    # sidecar regenerates; None for plain segments and for blocks the eraser
+    # never touched.
+    erase_mask: Optional[np.ndarray] = None
+    # Incremented every time ``clean_patch`` is replaced by an upgrade (a
+    # sidecar result).  Renderers cache converted patches per (segment,
+    # serial), so a bump - and nothing else - forces a re-conversion.
+    clean_patch_serial: int = 0
+    # The panel the block lies in (frame coordinates), as ``render/place.py``
+    # labels the page; None when no panel could be identified.  One inpainting
+    # job is planned per panel.
+    panel_box: Optional["Rect"] = None
 
     @property
     def is_block(self) -> bool:
@@ -176,6 +190,11 @@ class SegmentStyle:
             ),
             ink_map=self.ink_map,
             blocked_map=self.blocked_map,
+            erase_mask=self.erase_mask,
+            clean_patch_serial=self.clean_patch_serial,
+            panel_box=None if self.panel_box is None else Rect(
+                self.panel_box.x + dx, self.panel_box.y + dy, self.panel_box.w, self.panel_box.h
+            ),
         )
 
 

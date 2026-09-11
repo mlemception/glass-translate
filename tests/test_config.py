@@ -25,6 +25,26 @@ def test_defaults_are_sane():
     assert isinstance(cfg.overlay, OverlayGeometry)
 
 
+def test_quality_renderer_defaults_off_and_is_normalised(tmp_path: Path):
+    """An unknown mode from a hand-edited config must never launch the sidecar."""
+    from glasstranslate.config.settings import normalize_quality_renderer
+
+    cfg = AppConfig()
+    assert cfg.quality_renderer == "off" and cfg.quality_sidecar_python == ""
+    assert normalize_quality_renderer("Auto") == "auto"
+    assert normalize_quality_renderer(" off ") == "off"
+    for bad in ("cuda", "", None, 3, "on"):
+        assert normalize_quality_renderer(bad) == "off"
+    assert AppConfig.from_dict({"quality_renderer": "auto"}).quality_renderer == "auto"
+    assert AppConfig.from_dict({"quality_renderer": "nonsense"}).quality_renderer == "off"
+    assert AppConfig.from_dict({"quality_renderer": 7}).quality_renderer == "off"
+    assert AppConfig.from_dict({"quality_sidecar_python": "  C:/py.exe "}).quality_sidecar_python == "C:/py.exe"
+    path = tmp_path / "config.json"
+    AppConfig(quality_renderer="auto", quality_sidecar_python="C:/py.exe").save(path)
+    loaded = AppConfig.load(path)
+    assert loaded.quality_renderer == "auto" and loaded.quality_sidecar_python == "C:/py.exe"
+
+
 def test_roundtrip_save_load(tmp_path: Path):
     path = tmp_path / "sub" / "config.json"
     cfg = AppConfig(
