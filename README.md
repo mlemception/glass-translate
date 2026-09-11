@@ -90,8 +90,13 @@ Building the bundle (developer machine, from the local stores, nothing is downlo
 build.bat --no-test          :: dist\GlassTranslate.exe
 build_renderer.bat           :: dist\renderer\  (PyInstaller onedir freeze of renderer\glassrenderer from renderer\.venv)
 build_portable.bat           :: verifies every model digest, assembles and zips both artefacts, writes the .sha256 files
+build_portable.bat --single  :: one dist\GlassTranslate-<v>-full-win64.zip (program + models, ~13.6 GB) instead of the pair
 .venv\Scripts\python packaging\smoke_test.py --runs portable --portable-zip dist\GlassTranslate-<v>-portable-win64.zip --models-zip dist\GlassTranslate-<v>-models-win64.zip
 ```
+
+`build_portable.bat --single` writes a single archive, `GlassTranslate-<version>-full-win64.zip`
+(about 13.6 GB), with exactly the layout the pair unpacks to, for a one-download bundle; verify it
+by unpacking and running the smoke with `--portable-dir <unpacked root>`.
 
 The `portable` smoke run is the acceptance test: it unpacks both zips into a folder whose path
 has a space and a non-ASCII character, strips `PATH` to System32, points `HTTP(S)_PROXY` at a

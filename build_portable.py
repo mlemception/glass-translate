@@ -1,6 +1,7 @@
 """Assemble the two portable zips from the built exes and the local model store.
 
     .venv\\Scripts\\python build_portable.py               # build both zips
+    .venv\\Scripts\\python build_portable.py --single      # one -full-win64.zip with program + models
     .venv\\Scripts\\python build_portable.py --dry-run     # list what would be zipped
     .venv\\Scripts\\python build_portable.py --stage-only  # refresh the staged folder only
 
@@ -15,6 +16,10 @@ Steps:
   (6) dist/GlassTranslate-<version>-models-win64.zip + .sha256, straight from models/ (never
                                        staged: copying 11 GB to zip it costs an hour and a disk)
   (7) a size / timing table, also written to build/portable-build.json
+
+``--single`` replaces (5) and (6) with one ``dist/GlassTranslate-<version>-full-win64.zip`` that
+holds the program and the models in the same layout (the staged folder plus ``models/`` and its
+``MANIFEST.json`` under the one top-level folder); the pair from an earlier build is left alone.
 
 Each zip is written to ``<name>.part`` and renamed into place only when it is complete, and its
 checksum is written immediately after it, so a failed run never leaves a stale zip/checksum pair.
@@ -78,6 +83,8 @@ STORED_SUFFIXES = (".safetensors", ".onnx", ".bin", ".pt")
 STORED_MIN_BYTES = 64 * 1024 * 1024
 
 Entry = Tuple[str, Optional[Path]]
+# One archive of the build plan: (step banner, label, zip name, sorted entries).
+ZipPlan = Tuple[str, str, str, List[Entry]]
 
 
 class PortableBuildError(RuntimeError):
@@ -394,14 +401,30 @@ def _write_sha256(zip_path: Path) -> Path:
     return target
 
 
+def _zip_plan(version: str, stage: Optional[Path], manifest: Dict[str, object],
+              manifest_path: Optional[Path], *, single: bool = False) -> List[ZipPlan]:
+    """The archives a build writes, as ``(step, label, zip name, entries)`` per archive.
+
+    The pair (default): the portable zip from the staged folder and the models zip straight
+    from the store.  ``single``: one ``GlassTranslate-<version>-full-win64.zip`` holding the
+    program and the models in exactly the layout the pair unpacks to (one top-level folder,
+    ``models/`` with its ``MANIFEST.json`` under it), for a one-download bundle.  ``stage``
+    and ``manifest_path`` may be None for a dry-run listing.
+    """
+    app = _app_entries(version, stage)
+    models = _models_entries(version, manifest, manifest_path)
+    if single:
+        return [("5/7", "full", f"GlassTranslate-{version}-full-win64.zip", sorted(app + models))]
+    return [
+        ("5/7", "portable", f"GlassTranslate-{version}-portable-win64.zip", app),
+        ("6/7", "models", f"GlassTranslate-{version}-models-win64.zip", models),
+    ]
+
+
 def _build_zips(version: str, stage: Path, manifest: Dict[str, object], manifest_path: Path,
-                timings: Dict[str, float]) -> Dict[str, Path]:
-    """Steps (5)-(7): write both zips and their ``sha256sum`` sidecars."""
-    plan = (
-        ("5/7", "portable", f"GlassTranslate-{version}-portable-win64.zip", _app_entries(version, stage)),
-        ("6/7", "models", f"GlassTranslate-{version}-models-win64.zip",
-         _models_entries(version, manifest, manifest_path)),
-    )
+                timings: Dict[str, float], *, single: bool = False) -> Dict[str, Path]:
+    """Steps (5)-(6): write the planned zips and their ``sha256sum`` sidecars."""
+    plan = _zip_plan(version, stage, manifest, manifest_path, single=single)
     zips: Dict[str, Path] = {}
     for step, label, name, entries in plan:
         _banner(step, f"Write dist/{name} (+ .sha256)")
@@ -417,8 +440,12 @@ def _build_zips(version: str, stage: Path, manifest: Dict[str, object], manifest
 
 
 def step_report(version: str, generated: str, sizes: Dict[str, int], timings: Dict[str, float],
-                manifest: Dict[str, object], zips: Dict[str, Path]) -> None:
-    """Print the size / timing table and write build/portable-build.json (the perf doc reads it)."""
+                manifest: Dict[str, object], zips: Dict[str, Path], *, single: bool = False) -> None:
+    """Print the size / timing table and write build/portable-build.json (the perf doc reads it).
+
+    ``sizes`` and ``zips`` describe the archives that were actually written: the pair, or the
+    one full archive of ``--single``, which the report records under ``"single"``.
+    """
     _banner("7/7", "Summary")
     for label, value in sizes.items():
         print(f"  {label:<22} {_mb(value):>14}")
@@ -428,6 +455,7 @@ def step_report(version: str, generated: str, sizes: Dict[str, int], timings: Di
     REPORT_PATH.write_text(json.dumps({
         "version": version,
         "generated": generated,
+        "single": single,
         "sizes_bytes": sizes,
         "timings_s": {k: round(v, 2) for k, v in timings.items()},
         "model_files": len(manifest["files"]),  # type: ignore[arg-type]
@@ -450,8 +478,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-research-models", action="store_true",
                         help="leave out packs licensed for research use only (the Sugoi "
                              "conversion), producing a bundle that may be shared")
+    parser.add_argument("--single", action="store_true",
+                        help="write one GlassTranslate-<v>-full-win64.zip holding the program and "
+                             "the models instead of the pair; same layout")
     parser.add_argument("--version", help="override glasstranslate.__version__")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.single and args.stage_only:
+        parser.error("--single cannot be combined with --stage-only: nothing is zipped after staging")
+    return args
 
 
 def _version(override: Optional[str]) -> str:
@@ -475,8 +509,8 @@ def _run(args: argparse.Namespace) -> int:
     timings["hash store"] = time.perf_counter() - mark
     if args.dry_run:
         _banner("4/7", "Dry run - nothing is written")
-        _listing(f"GlassTranslate-{version}-portable-win64.zip", _app_entries(version, None))
-        _listing(f"GlassTranslate-{version}-models-win64.zip", _models_entries(version, manifest, None))
+        for _step, _label, name, entries in _zip_plan(version, None, manifest, None, single=args.single):
+            _listing(name, entries)
         print(f"\ndry run complete in {time.perf_counter() - started:.1f} s")
         return 0
     mark = time.perf_counter()
@@ -488,15 +522,16 @@ def _run(args: argparse.Namespace) -> int:
         print(f"\n--stage-only: stopped after staging; the zips in {DIST.relative_to(ROOT)} "
               "were left untouched")
         return 0
-    zips = _build_zips(version, stage, manifest, manifest_path, timings)
+    zips = _build_zips(version, stage, manifest, manifest_path, timings, single=args.single)
     timings["total"] = time.perf_counter() - started
-    step_report(version, generated, {
+    sizes: Dict[str, int] = {
         "app exe": APP_EXE.stat().st_size,
         "renderer folder": _dir_bytes(RENDERER_DIR),
         "models folder": int(manifest["total_bytes"]),  # type: ignore[arg-type]
-        "portable zip": zips["portable"].stat().st_size,
-        "models zip": zips["models"].stat().st_size,
-    }, timings, manifest, zips)
+    }
+    # One row per archive actually written: "portable zip" + "models zip", or "full zip".
+    sizes.update({f"{label} zip": path.stat().st_size for label, path in zips.items()})
+    step_report(version, generated, sizes, timings, manifest, zips, single=args.single)
     return 0
 
 

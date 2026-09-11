@@ -759,6 +759,62 @@ def test_zip_entries_share_one_sorted_top_level_folder(fake_store, tmp_path: Pat
     assert any(arc.endswith("/models/MANIFEST.json") for arc, _ in models)
 
 
+def _fake_stage(tmp_path: Path) -> Path:
+    stage = tmp_path / "GlassTranslate-0.2.0"
+    (stage / "renderer").mkdir(parents=True)
+    (stage / "GlassTranslate.exe").write_bytes(b"exe")
+    (stage / "renderer" / "glassrenderer.exe").write_bytes(b"sidecar")
+    (stage / "portable.txt").write_text("marker", encoding="utf-8")
+    return stage
+
+
+def test_zip_plan_single_is_one_full_archive_holding_both_halves(fake_store, tmp_path: Path):
+    models_dir, table, ocr_files = fake_store
+    manifest = portable_store.store_manifest(
+        models_dir, "2026-09-11", quality_files=table, manga_ocr_files=ocr_files
+    )
+    stage = _fake_stage(tmp_path)
+    manifest_path = tmp_path / "MANIFEST.json"
+    plan = build_portable._zip_plan("0.2.0", stage, manifest, manifest_path, single=True)
+    assert len(plan) == 1
+    step, label, name, entries = plan[0]
+    assert (step, label) == ("5/7", "full")
+    assert name == "GlassTranslate-0.2.0-full-win64.zip" and name.endswith("-full-win64.zip")
+    app = build_portable._app_entries("0.2.0", stage)
+    models = build_portable._models_entries("0.2.0", manifest, manifest_path)
+    assert entries == sorted(entries)
+    assert entries == sorted(app + models)  # the union of the pair, nothing more, nothing less
+    assert {arc.split("/")[0] for arc, _ in entries} == {"GlassTranslate-0.2.0"}
+    names = {arc for arc, _ in entries}
+    assert "GlassTranslate-0.2.0/models/MANIFEST.json" in names
+    assert "GlassTranslate-0.2.0/GlassTranslate.exe" in names
+    assert "GlassTranslate-0.2.0/portable.txt" in names
+    assert "GlassTranslate-0.2.0/renderer/glassrenderer.exe" in names
+
+
+def test_zip_plan_defaults_to_the_portable_and_models_pair(fake_store, tmp_path: Path):
+    models_dir, table, ocr_files = fake_store
+    manifest = portable_store.store_manifest(
+        models_dir, "2026-09-11", quality_files=table, manga_ocr_files=ocr_files
+    )
+    stage = _fake_stage(tmp_path)
+    plan = build_portable._zip_plan("0.2.0", stage, manifest, tmp_path / "MANIFEST.json")
+    assert [(step, label, name) for step, label, name, _ in plan] == [
+        ("5/7", "portable", "GlassTranslate-0.2.0-portable-win64.zip"),
+        ("6/7", "models", "GlassTranslate-0.2.0-models-win64.zip"),
+    ]
+    assert plan[0][3] == build_portable._app_entries("0.2.0", stage)
+    assert plan[1][3] == build_portable._models_entries("0.2.0", manifest, tmp_path / "MANIFEST.json")
+
+
+def test_parse_args_accepts_single_and_rejects_it_with_stage_only():
+    assert build_portable.parse_args(["--single"]).single is True
+    assert build_portable.parse_args([]).single is False
+    assert build_portable.parse_args(["--single", "--dry-run"]).dry_run is True
+    with pytest.raises(SystemExit):
+        build_portable.parse_args(["--single", "--stage-only"])
+
+
 def test_write_sha256_uses_the_sha256sum_format(tmp_path: Path):
     target = tmp_path / "bundle.zip"
     target.write_bytes(b"payload")

@@ -21,10 +21,16 @@ _Status: final for session 9 — every number comes from this session's builds
 | `models\manga-ocr` | 7 files (`ocr/models.py MANGA_OCR_FILES`), sha256 verified | 201.6 MB | — |
 | Argos / Sugoi packs | `ja_en\` (7 files), `translate-en_de-1_3\` (8), `sugoi-v4-ja-en\` (8); 32 offered pairs uncovered (listed in `MANIFEST.json`) | 1,406 MB | — |
 | `GlassTranslate-0.2.0-models-win64.zip` | the store above + `MANIFEST.json` (55 entries; big weights stored, small files deflated) | 11,601.1 MB | **11,588.4 MB** |
+| `GlassTranslate-0.2.0-full-win64.zip` (`--single`) | the two halves in one archive, same layout (5953 entries = the union of the pair; 8 big weights stored) | 14,690.5 MB | **13,634.9 MB** |
 
 `build_portable.py` timings: torch-free scan 0.2 s, hashing the store 8.7 s (NVMe, cached), staging
 12.9 s, portable zip 119.2 s (deflate), models zip 19.0 s (stored), total 171.5 s
-(`build/portable-build.json`).
+(`build/portable-build.json`).  `--single` (2026-09-11): hashing 8.0 s, staging 13.2 s, the full
+zip 150.2 s, total 172.7 s; the pair from the earlier build is left untouched (same timestamps and
+digests).  Verified by unpacking the full zip into a space + non-ASCII folder (20.9 s): one
+top-level folder, `models/quality` 24 files, `models/manga-ocr` 7 files, every `MANIFEST.json`
+row present at its recorded size, sha256 sidecar matching, then the `portable` smoke run with
+`--portable-dir` on that root (verdict in § 4).
 
 ## 2. Freezing the sidecar (`build_renderer.py`)
 
@@ -94,6 +100,7 @@ Sandbox `%TEMP%\gt portable ü_<id>\`, root `GlassTranslate-0.2.0\`, then moved 
 | `probeSidecar` through the app's own lookup (fake mode) | 0.17 s, kind `frozen` |
 | Total checks, first pass without the GPU checks | 218 / 224, the six failures being the pixel rows and the driver-cache rows above |
 | Total checks, final pass with the GPU checks (final zips) | 241 / 245, the four failures being the pixel rows |
+| `--single` archive, `--portable-dir` run on the unpacked root (no GPU) | 227 / 229 — the same rows as the pair's non-GPU rows (only the two intake rows differ by design: an existing root instead of two zips unpacked); the two failures are the pixel rows (C2 2.0, M-C2 4.6); fake sidecar READY 0.85 s / 0.19 s, exe cold start 2.9–3.8 s, relocation green |
 
 ## 5. Reading the numbers
 

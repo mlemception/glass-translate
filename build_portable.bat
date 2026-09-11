@@ -4,6 +4,7 @@ rem   build_portable.bat            build dist\GlassTranslate-<v>-portable-win64
 rem   build_portable.bat --dry-run  verify the store and list what would be zipped, write nothing
 rem   build_portable.bat --stage-only  refresh build\portable\ (licence index included) only
 rem   build_portable.bat --no-research-models  leave out the research-licensed Sugoi pack
+rem   build_portable.bat --single   write one dist\GlassTranslate-<v>-full-win64.zip (program + models, same layout) instead of the pair
 rem Needs dist\GlassTranslate.exe (build.bat) and dist\renderer\glassrenderer.exe (build_renderer.bat).
 setlocal
 set PYTHONUTF8=1
