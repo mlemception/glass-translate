@@ -8,8 +8,14 @@ and nothing here imports Qt.
 
 Three pieces:
 
-* :class:`QualityClient` - spawns ``<python> -m glassrenderer serve`` (cwd =
-  the ``renderer`` directory so the package is importable), waits for the
+* :func:`find_sidecar_python` - the launcher, in the order of the portable
+  plan: the frozen ``renderer\\glassrenderer.exe`` next to the app exe, then
+  ``cfg.quality_sidecar_python``, then the checkout's and the user profile's
+  ``renderer/.venv``.  :func:`sidecar_kind` and :func:`sidecar_command` turn it
+  into an argv.
+* :class:`QualityClient` - spawns that launcher (``glassrenderer.exe serve`` or
+  ``<python> -m glassrenderer serve``, cwd = the directory the package or the
+  exe lives in), waits for the
   ``READY <port>`` line, and offers :meth:`~QualityClient.health` /
   :meth:`~QualityClient.inpaint` / :meth:`~QualityClient.shutdown`.  Every
   response is re-composited against the mask, so a pixel the mask left at 0
@@ -48,10 +54,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 import cv2
 import numpy as np
 
-from ..config.settings import project_root, user_data_dir
+from ..config.settings import app_dir, logs_dir, project_root, user_data_dir
 from ..core.types import Rect, SegmentStyle
 
 __all__ = [
+    "FROZEN_SIDECAR_EXE",
     "Job",
     "MemberKey",
     "QUALITY_MASK_DILATE",
@@ -63,7 +70,9 @@ __all__ = [
     "composite_block_patch",
     "find_sidecar_python",
     "panel_jobs",
+    "sidecar_command",
     "sidecar_dir",
+    "sidecar_kind",
 ]
 
 log = logging.getLogger(__name__)
@@ -104,6 +113,14 @@ LOOPBACK = "127.0.0.1"
 TOKEN_ENV = "GT_RENDERER_TOKEN"
 SIDECAR_PACKAGE = "glassrenderer"
 SIDECAR_DIRNAME = "renderer"
+# The portable bundle's frozen sidecar, in <app dir>/renderer/ next to the app exe.
+# Compared case-insensitively, so it doubles as the marker of a "frozen" launcher.
+FROZEN_SIDECAR_EXE = "glassrenderer.exe"
+# Dropped from the sidecar's environment before it is launched: whatever the parent
+# inherited, a launcher must import its own site-packages and nobody else's.
+# PYTHONNOUSERSITE=1 replaces PYTHONUSERBASE's per-user site-packages as well.
+STRIPPED_PYTHON_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE")
+HF_HOME_DIRNAME = "hf-home"  # huggingface_hub's cache, kept inside the models folder
 _LOG_DEFAULT = object()  # sentinel: "the standard renderer.log"; None means DEVNULL
 
 MemberKey = Tuple[str, int, int, int, int]  # (source text, clean_rect x, y, w, h)
@@ -154,7 +171,7 @@ def _one_line(value: object) -> str:
     return text[:200] if text else "unknown error"
 
 
-# --------------------------------------------------------------- interpreter lookup
+# ------------------------------------------------------------------ launcher lookup
 def _venv_python(root: Path) -> Path:
     if sys.platform == "win32":
         return root / ".venv" / "Scripts" / "python.exe"
@@ -170,14 +187,31 @@ def _sidecar_roots() -> List[Path]:
     return roots
 
 
-def find_sidecar_python(cfg: Any) -> Optional[Path]:
-    """The interpreter that can run the sidecar, or None when it is not installed.
+def _frozen_sidecar() -> Optional[Path]:
+    """``<app dir>/renderer/glassrenderer.exe`` when the bundle ships the frozen sidecar."""
+    candidate = app_dir() / SIDECAR_DIRNAME / FROZEN_SIDECAR_EXE
+    return candidate if candidate.is_file() else None
 
-    ``cfg.quality_sidecar_python`` wins when it points at an existing file;
-    otherwise ``<project>/renderer/.venv`` in a source checkout and
-    ``%LOCALAPPDATA%/GlassTranslate/renderer/.venv`` in the frozen build (whose
-    project root is a temporary extraction directory).
+
+def find_sidecar_python(cfg: Any) -> Optional[Path]:
+    """The launcher that can run the sidecar, or None when none is installed.
+
+    The order of docs/plans/2026-09-11-portable-bundle.md 1.4:
+
+    1. ``<app dir>/renderer/glassrenderer.exe`` - the frozen sidecar of the
+       portable bundle, next to the running exe (the checkout in a source tree);
+    2. ``cfg.quality_sidecar_python`` when it points at an existing file (an
+       interpreter, or another ``glassrenderer.exe``);
+    3. ``<project>/renderer/.venv`` in a source checkout;
+    4. ``%LOCALAPPDATA%/GlassTranslate/renderer/.venv`` for an installed exe,
+       whose project root is a temporary extraction directory.
+
+    The result is the launcher path either way; :func:`sidecar_kind` tells the
+    two apart and :func:`sidecar_command` builds the argv for each.
     """
+    frozen = _frozen_sidecar()
+    if frozen is not None:
+        return frozen
     explicit = str(getattr(cfg, "quality_sidecar_python", "") or "").strip()
     if explicit:
         path = Path(explicit)
@@ -190,10 +224,33 @@ def find_sidecar_python(cfg: Any) -> Optional[Path]:
     return None
 
 
+def sidecar_kind(launcher: Union[str, Path]) -> str:
+    """``"frozen"`` for a ``glassrenderer.exe`` launcher, ``"venv"`` for an interpreter."""
+    return "frozen" if Path(launcher).name.lower() == FROZEN_SIDECAR_EXE else "venv"
+
+
+def sidecar_command(
+    launcher: Union[str, Path], models_dir: Union[str, Path], *, fake: bool = False
+) -> List[str]:
+    """The argv that starts the sidecar: the frozen exe serves directly, an
+    interpreter runs the package as ``-m glassrenderer``."""
+    if sidecar_kind(launcher) == "frozen":
+        cmd = [str(launcher), "serve", "--models-dir", str(models_dir)]
+    else:
+        cmd = [str(launcher), "-m", SIDECAR_PACKAGE, "serve", "--models-dir", str(models_dir)]
+    if fake:
+        cmd.append("--fake")
+    return cmd
+
+
 def sidecar_dir(python: Optional[Union[str, Path]] = None) -> Optional[Path]:
-    """Directory that holds the ``glassrenderer`` package (the sidecar's cwd)."""
+    """The sidecar's working directory: a frozen launcher's own folder, else the
+    directory that holds the ``glassrenderer`` package."""
     if python is not None:
-        for parent in Path(python).resolve().parents:
+        path = Path(python)
+        if sidecar_kind(path) == "frozen":
+            return path.resolve().parent
+        for parent in path.resolve().parents:
             if (parent / SIDECAR_PACKAGE).is_dir():
                 return parent
     for root in _sidecar_roots():
@@ -229,7 +286,9 @@ class QualityClient:
     """One sidecar process (or, in tests, one already-running server).
 
     Args:
-        python: interpreter of the sidecar venv; None with an injected ``start``.
+        python: the launcher from :func:`find_sidecar_python` - the frozen
+            ``glassrenderer.exe`` or the sidecar venv's interpreter; None with
+            an injected ``start``.
         models_dir: passed through as ``--models-dir``.
         fake: run the sidecar's numpy stand-ins (no torch, no GPU).
         token: the per-session ``GT_RENDERER_TOKEN``; a fresh one by default.
@@ -299,7 +358,7 @@ class QualityClient:
             return subprocess.DEVNULL
         path = self._log_path
         if path is _LOG_DEFAULT:
-            path = user_data_dir() / "logs" / "renderer.log"
+            path = logs_dir() / "renderer.log"
         try:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             self._log_file = open(path, "ab")
@@ -310,12 +369,18 @@ class QualityClient:
 
     def _spawn(self) -> int:
         if self._python is None:
-            raise QualityUnavailable("no sidecar interpreter (run renderer\\install.bat)")
-        cmd = [str(self._python), "-m", SIDECAR_PACKAGE, "serve", "--models-dir", str(self._models_dir)]
-        if self._fake:
-            cmd.append("--fake")
+            raise QualityUnavailable(
+                "no sidecar launcher (renderer\\glassrenderer.exe next to the app, "
+                "or run renderer\\install.bat)"
+            )
+        cmd = sidecar_command(self._python, self._models_dir, fake=self._fake)
         env = dict(os.environ)
         env[TOKEN_ENV] = self._token  # never on the command line: process lists are readable
+        # The sidecar runs its own interpreter (or is frozen): an inherited PYTHONPATH or
+        # PYTHONHOME would shadow its site-packages with the parent's - or a stranger's.
+        for name in STRIPPED_PYTHON_ENV:
+            env.pop(name, None)
+        env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONUTF8"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         # No data leaves the machine: the model files are pinned and verified locally, so the
@@ -323,6 +388,11 @@ class QualityClient:
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
         env["DIFFUSERS_DISABLE_REMOTE_CODE"] = "true"
+        # Pin huggingface_hub's cache inside the models folder, overriding whatever the
+        # parent inherited: every file is loaded from --models-dir by local path and the
+        # hub cache is never consulted, so an inherited HF_HOME has no legitimate use
+        # here and must not be able to send writes outside the models folder.
+        env["HF_HOME"] = str(self._models_dir / HF_HOME_DIRNAME)
         cwd = self._cwd if self._cwd is not None else sidecar_dir(self._python)
         kwargs: Dict[str, Any] = {}
         if sys.platform == "win32":
@@ -445,6 +515,8 @@ class QualityClient:
         if body is not None:
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = str(len(body))
+        # http.client connects straight to the loopback address: no proxy environment
+        # (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY, which urllib would honour) is consulted.
         conn = http.client.HTTPConnection(LOOPBACK, port, timeout=timeout or self._timeout)
         try:
             conn.request(method, path, body=body, headers=headers)

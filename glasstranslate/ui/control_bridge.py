@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from PySide6.QtCore import Property, QObject, QPointF, QSizeF, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QFontDatabase, QWindow
 
-from ..config.settings import AppConfig, user_data_dir
+from ..config.settings import AppConfig, logs_dir
 from .bridge_fields import (
     _CONFIG_FIELDS,
     _ONLINE_BACKENDS,
@@ -636,7 +636,7 @@ class ControlBridge(QObject):
         if self._cfg.quality_renderer != "auto":
             return "Off"
         if find_sidecar_python(self._cfg) is None:
-            return "Sidecar not installed - run renderer\\install.bat"
+            return "Sidecar not found (renderer\\glassrenderer.exe next to the app, or run renderer\\install.bat)"
         if not self._quality_models_ready():
             return f"Models not downloaded ({size_label()})"
         return "Ready"
@@ -765,8 +765,9 @@ class ControlBridge(QObject):
 
     @Slot()
     def openLogs(self) -> None:
-        """Open the log folder of the packaged build in Explorer."""
-        folder = user_data_dir() / "logs"
+        """Open the log folder of the packaged build in Explorer (the portable
+        bundle's own ``logs/`` when it runs from one)."""
+        folder = logs_dir()
         if folder.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
         else:

@@ -18,3 +18,9 @@ glasstranslate/ui/resources_rc.py
 # Local credentials for live checks (never committed)
 Secret/
 renderer/.venv/
+# portable-mode marker (docs/plans/2026-09-11-portable-bundle.md): only ever written by build_portable.py
+# into the bundle; a copy next to run.py switches a checkout to portable paths and must stay local.
+# Anchored to the repo root: glasstranslate/config/ is a source package and must never match.
+/portable.txt
+/config/
+/logs/

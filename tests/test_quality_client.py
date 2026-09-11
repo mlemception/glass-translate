@@ -12,6 +12,7 @@ One opt-in subprocess test spawns the real sidecar in ``--fake`` mode when
 from __future__ import annotations
 
 import base64
+import io
 import json
 import subprocess
 import sys
@@ -198,7 +199,43 @@ def test_health_and_shutdown(server: _FakeServer) -> None:
     assert [p for p, _ in server.requests if p == "/shutdown"]
 
 
-# ------------------------------------------------------------------------- interpreter lookup
+def test_the_loopback_client_ignores_the_proxy_environment(server: _FakeServer,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """The portable acceptance run points every proxy variable at a dead port
+    (docs/plans/2026-09-11-portable-bundle.md 4): ``_request`` uses ``http.client``
+    directly, so 127.0.0.1 is reached whatever the environment says."""
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    client = _client(server)
+    assert client.health()["ok"] is True
+    client.shutdown()
+
+
+# ---------------------------------------------------------------------------- launcher lookup
+@pytest.fixture()
+def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tuple[Path, Path, Path]:
+    """Empty app / checkout / user-data roots, so a test only finds what it creates."""
+    app, project, userdata = tmp_path / "app", tmp_path / "project", tmp_path / "userdata"
+    for folder in (app, project, userdata):
+        folder.mkdir()
+    monkeypatch.setattr(Q, "app_dir", lambda: app)
+    monkeypatch.setattr(Q, "project_root", lambda: project)
+    monkeypatch.setattr(Q, "user_data_dir", lambda: userdata)
+    monkeypatch.setattr(Q, "logs_dir", lambda: userdata / "logs")
+    return app, project, userdata
+
+
+def _touch(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+def _renderer_venv(root: Path) -> Path:
+    """The sidecar interpreter a ``<root>/renderer/.venv`` install would hold."""
+    return Q._venv_python(root / Q.SIDECAR_DIRNAME)
+
+
 def test_find_sidecar_python_prefers_the_configured_interpreter(tmp_path: Path) -> None:
     exe = tmp_path / "python.exe"
     exe.write_text("", encoding="utf-8")
@@ -208,6 +245,166 @@ def test_find_sidecar_python_prefers_the_configured_interpreter(tmp_path: Path) 
     missing = AppConfig(quality_sidecar_python=str(tmp_path / "nope.exe"))
     found = Q.find_sidecar_python(missing)
     assert found is None or found.exists()
+
+
+def test_a_frozen_sidecar_next_to_the_app_wins(roots: Tuple[Path, Path, Path], tmp_path: Path) -> None:
+    app, project, userdata = roots
+    exe = _touch(app / Q.SIDECAR_DIRNAME / Q.FROZEN_SIDECAR_EXE)
+    configured = _touch(tmp_path / "other" / "python.exe")
+    _touch(_renderer_venv(project))
+    _touch(_renderer_venv(userdata))
+    assert Q.find_sidecar_python(AppConfig(quality_sidecar_python=str(configured))) == exe
+    assert Q.sidecar_kind(exe) == "frozen"
+
+
+def test_the_configured_interpreter_beats_the_venv_roots(roots: Tuple[Path, Path, Path],
+                                                         tmp_path: Path) -> None:
+    _app, project, userdata = roots
+    _touch(_renderer_venv(project))
+    _touch(_renderer_venv(userdata))
+    configured = _touch(tmp_path / "other" / "python.exe")
+    assert Q.find_sidecar_python(AppConfig(quality_sidecar_python=str(configured))) == configured
+    assert Q.sidecar_kind(configured) == "venv"
+
+
+def test_a_configured_glassrenderer_exe_is_a_frozen_launcher(roots: Tuple[Path, Path, Path],
+                                                             tmp_path: Path) -> None:
+    exe = _touch(tmp_path / "elsewhere" / "GlassRenderer.EXE")  # the name is matched case-insensitively
+    assert Q.find_sidecar_python(AppConfig(quality_sidecar_python=str(exe))) == exe
+    assert Q.sidecar_kind(exe) == "frozen"
+
+
+def test_the_checkout_venv_comes_before_the_user_data_one(roots: Tuple[Path, Path, Path]) -> None:
+    _app, project, userdata = roots
+    profile = _touch(_renderer_venv(userdata))
+    assert Q.find_sidecar_python(AppConfig()) == profile
+    checkout = _touch(_renderer_venv(project))
+    assert Q.find_sidecar_python(AppConfig()) == checkout
+
+
+def test_no_launcher_anywhere_is_none(roots: Tuple[Path, Path, Path], tmp_path: Path) -> None:
+    assert Q.find_sidecar_python(AppConfig()) is None
+    gone = AppConfig(quality_sidecar_python=str(tmp_path / "nope" / "python.exe"))
+    assert Q.find_sidecar_python(gone) is None
+
+
+def test_sidecar_command_for_both_kinds(tmp_path: Path) -> None:
+    exe = tmp_path / "renderer" / Q.FROZEN_SIDECAR_EXE
+    python = tmp_path / "renderer" / ".venv" / "python.exe"
+    models = tmp_path / "models"
+    assert Q.sidecar_command(exe, models, fake=False) == [str(exe), "serve", "--models-dir", str(models)]
+    assert Q.sidecar_command(exe, models, fake=True) == [
+        str(exe), "serve", "--models-dir", str(models), "--fake"]
+    assert Q.sidecar_command(python, models, fake=False) == [
+        str(python), "-m", Q.SIDECAR_PACKAGE, "serve", "--models-dir", str(models)]
+    assert Q.sidecar_command(python, models, fake=True)[-1] == "--fake"
+
+
+def test_sidecar_dir_of_a_frozen_launcher_is_its_own_folder(roots: Tuple[Path, Path, Path]) -> None:
+    app, project, _userdata = roots
+    exe = _touch(app / Q.SIDECAR_DIRNAME / Q.FROZEN_SIDECAR_EXE)
+    assert Q.sidecar_dir(exe) == (app / Q.SIDECAR_DIRNAME).resolve()
+    python = _touch(_renderer_venv(project))
+    (project / Q.SIDECAR_DIRNAME / Q.SIDECAR_PACKAGE).mkdir()
+    assert Q.sidecar_dir(python) == (project / Q.SIDECAR_DIRNAME).resolve()
+
+
+# ------------------------------------------------------------------------------- the launch
+class _FakeProcess:
+    """Just enough of ``subprocess.Popen`` for ``_spawn`` and ``_read_ready``."""
+
+    def __init__(self, cmd: List[str], **kwargs: object) -> None:
+        self.cmd = list(cmd)
+        self.kwargs = dict(kwargs)
+        self.stdout = io.StringIO("READY 43123\n")
+        self.stdin = io.StringIO()
+        self.returncode: Optional[int] = None
+
+    def poll(self) -> Optional[int]:
+        return self.returncode
+
+    def wait(self, timeout: Optional[float] = None) -> int:
+        self.returncode = 0
+        return 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+def _spawn(monkeypatch: pytest.MonkeyPatch, client: Q.QualityClient) -> _FakeProcess:
+    """Start ``client`` against a recording stand-in for Popen and return that process."""
+    seen: List[_FakeProcess] = []
+
+    def fake_popen(cmd: List[str], **kwargs: object) -> _FakeProcess:
+        proc = _FakeProcess(cmd, **kwargs)
+        seen.append(proc)
+        return proc
+
+    monkeypatch.setattr(Q.subprocess, "Popen", fake_popen)
+    assert client.start() == 43123
+    return seen[0]
+
+
+POISON_PYTHON = "C:/somebody-elses-python"
+POISON_HF_HOME = "C:/somebody-elses-hf-cache"
+
+
+def _poison_parent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set everything ``_spawn`` must drop or override, so the test proves it did."""
+    for name in Q.STRIPPED_PYTHON_ENV:
+        monkeypatch.setenv(name, POISON_PYTHON)
+    monkeypatch.setenv("HF_HOME", POISON_HF_HOME)
+
+
+def _assert_offline_env(env: Dict[str, str], token: str, models: Path) -> None:
+    assert env[Q.TOKEN_ENV] == token
+    assert env["PYTHONUTF8"] == "1" and env["PYTHONUNBUFFERED"] == "1"
+    assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
+    assert env["DIFFUSERS_DISABLE_REMOTE_CODE"] == "true"
+    # The sidecar imports its own site-packages and caches inside the models folder:
+    # an inherited PYTHONPATH is dropped and an inherited HF_HOME is replaced.
+    for name in Q.STRIPPED_PYTHON_ENV:
+        assert name not in env
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert env["HF_HOME"] == str(models.absolute() / Q.HF_HOME_DIRNAME)
+    assert env["HF_HOME"] != POISON_HF_HOME
+
+
+def test_spawn_runs_a_frozen_launcher_from_its_own_folder(
+    roots: Tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _project, userdata = roots
+    exe = _touch(app / Q.SIDECAR_DIRNAME / Q.FROZEN_SIDECAR_EXE)
+    models = tmp_path / "models"
+    token = "t" * 64
+    _poison_parent_env(monkeypatch)
+    client = Q.QualityClient(exe, models, fake=True, token=token)
+    proc = _spawn(monkeypatch, client)
+    assert proc.cmd == [str(exe), "serve", "--models-dir", str(models.absolute()), "--fake"]
+    assert Path(str(proc.kwargs["cwd"])) == (app / Q.SIDECAR_DIRNAME).resolve()
+    _assert_offline_env(proc.kwargs["env"], token, models)  # type: ignore[arg-type]
+    assert token not in proc.cmd  # process lists are readable: the token is env-only
+    assert (userdata / "logs" / "renderer.log").is_file()  # the default log path
+    client.shutdown()
+
+
+def test_spawn_runs_a_venv_interpreter_as_a_module(
+    roots: Tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app, project, _userdata = roots
+    python = _touch(_renderer_venv(project))
+    (project / Q.SIDECAR_DIRNAME / Q.SIDECAR_PACKAGE).mkdir()
+    models = tmp_path / "models"
+    token = "u" * 64
+    _poison_parent_env(monkeypatch)
+    client = Q.QualityClient(python, models, token=token)
+    proc = _spawn(monkeypatch, client)
+    assert proc.cmd == [
+        str(python), "-m", Q.SIDECAR_PACKAGE, "serve", "--models-dir", str(models.absolute())]
+    assert Path(str(proc.kwargs["cwd"])) == (project / Q.SIDECAR_DIRNAME).resolve()
+    _assert_offline_env(proc.kwargs["env"], token, models)  # type: ignore[arg-type]
+    assert token not in proc.cmd
+    client.shutdown()
 
 
 # ----------------------------------------------------------------------------- panel jobs

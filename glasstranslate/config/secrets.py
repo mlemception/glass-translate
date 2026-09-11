@@ -1,7 +1,8 @@
 """API keys and other secrets, stored OUTSIDE ``config.json``.
 
-``%LOCALAPPDATA%/GlassTranslate/secrets.json`` (see :func:`user_data_dir`) holds
-a flat ``{"name": "value"}`` map.  An environment variable (for Gemini:
+``%LOCALAPPDATA%/GlassTranslate/secrets.json`` (see :func:`~glasstranslate.config
+.settings.secrets_dir`; ``<portable root>/config/secrets.json`` in a portable
+bundle) holds a flat ``{"name": "value"}`` map.  An environment variable (for Gemini:
 ``GEMINI_API_KEY``) wins over the file when it is set and non-empty, so the
 frozen exe and CI can inject keys without touching the disk.
 
@@ -23,7 +24,7 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
-from .settings import user_data_dir
+from .settings import secrets_dir
 
 log = logging.getLogger(__name__)
 
@@ -42,12 +43,14 @@ _TAIL_CHARS = 2
 # ------------------------------------------------------------------- paths
 def secrets_path() -> Path:
     """Where the secrets file lives: ``GLASSTRANSLATE_SECRETS_FILE`` when set,
-    else ``user_data_dir()/secrets.json`` (never next to ``config.json`` in
-    ``%APPDATA%``; secrets belong with the other per-machine data)."""
+    else ``secrets_dir()/secrets.json`` - the user data dir on a normal install
+    (never next to ``config.json`` in ``%APPDATA%``; secrets belong with the
+    other per-machine data) and ``<portable root>/config`` in a portable
+    bundle, whose config folder holds both."""
     override = os.environ.get(SECRETS_FILE_ENV, "").strip()
     if override:
         return Path(override)
-    return user_data_dir() / SECRETS_FILE_NAME
+    return secrets_dir() / SECRETS_FILE_NAME
 
 
 # ------------------------------------------------------------------- store

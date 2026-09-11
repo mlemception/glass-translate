@@ -90,7 +90,14 @@ class LamaStage:
         torch._C._jit_set_profiling_mode(False)
         path = M.verify_file(self.models_dir, self.spec())
         log.info("loading %s on %s", path.name, self.device)
-        model = torch.jit.load(str(path), map_location=self.device)
+        # Open the file here and hand torch the file object, never the path string:
+        # ``torch.jit.load(str)`` goes through a C++ ``fopen`` that treats the UTF-8
+        # bytes as the ANSI code page on Windows, so a models folder with a non-ASCII
+        # character in its path ("…\moved ünïcode\models") fails with errno 2 even
+        # though the file is there (found by the portable acceptance run, 2026-09-11).
+        # Python's ``open`` uses the wide-character API and is not affected.
+        with open(path, "rb") as fh:
+            model = torch.jit.load(fh, map_location=self.device)
         model.eval()
         for param in model.parameters():
             param.requires_grad_(False)
