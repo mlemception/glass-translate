@@ -7,8 +7,9 @@ import ".."
     OverlayPage (docs/GLASS_DESIGN.md §2.3): card "Glass" (background opacity
     slider previewing live, font, hide original), card "Typesetting" (manga
     mode, uppercase - disabled while manga mode is off) and card "Misc"
-    (capture mode: the glass becomes visible to screenshot tools while the
-    pipeline is frozen; runtime only, never saved); hints are the old tooltips.
+    (capture mode: the glass and this window become visible to screenshot
+    tools while the pipeline is frozen; runtime only, never saved); hints are
+    the old tooltips.
 */
 // qmllint disable unqualified
 Flickable {
@@ -98,11 +99,11 @@ Flickable {
             title: "Misc"
             FormRow {
                 label: "Capture mode"
-                hint: "Let screenshot and screen-capture tools see the glass. The pipeline is frozen while this is on so the glass cannot read its own lettering; it is never saved and starts off every session."
+                hint: "Let screenshot and screen-capture tools see the glass and this window. The pipeline is frozen while this is on so the glass cannot read its own lettering, and this window keeps its last backdrop; it is never saved and starts off every session."
                 GlassToggle {
                     id: captureMode
                     objectName: "captureModeToggle"
-                    text: "Show the glass to screen capture"
+                    text: "Show the glass and this window to screen capture"
                     Binding on checked { value: bridge.overlayCaptureMode }
                     onToggled: bridge.overlayCaptureMode = captureMode.checked
                 }

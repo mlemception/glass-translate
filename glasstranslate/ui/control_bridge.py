@@ -76,7 +76,7 @@ class ControlBridge(QObject):
     start_stop_requested = Signal(bool)  # True = start
     grab_mode_requested = Signal()
     toggle_glass_requested = Signal()
-    capture_mode_requested = Signal(bool)  # overlay capture mode on/off (runtime only, F1)
+    capture_mode_requested = Signal(bool)  # capture mode on/off (runtime only, F1; the overlay and the control window)
     models_changed = Signal()  # a package was downloaded
 
     # -- QML notifies

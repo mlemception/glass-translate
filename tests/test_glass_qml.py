@@ -213,6 +213,7 @@ def test_overlay_page_has_capture_mode_toggle(window: C.ControlWindow) -> None:
     assert _qml_value(toggle, "checked") is False
     assert _qml_value(toggle, "Accessible.name")
     assert "capture" in str(_qml_value(toggle, "Accessible.description")).lower()
+    assert "window" in str(_qml_value(toggle, "text")).lower()  # the control window is captured too
 
 
 def test_capture_mode_toggle_round_trip(window: C.ControlWindow, qapp) -> None:

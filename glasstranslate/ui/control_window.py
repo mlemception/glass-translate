@@ -9,13 +9,14 @@ import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
-from PySide6.QtCore import QSize, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QCloseEvent,
     QExposeEvent,
     QHideEvent,
     QIcon,
     QMoveEvent,
+    QPlatformSurfaceEvent,
     QResizeEvent,
     QScreen,
     QShowEvent,
@@ -53,7 +54,7 @@ class ControlWindow(QQuickView):
     start_stop_requested = Signal(bool)  # True = start
     grab_mode_requested = Signal()
     toggle_glass_requested = Signal()
-    capture_mode_requested = Signal(bool)  # overlay capture mode on/off
+    capture_mode_requested = Signal(bool)  # capture mode on/off (the overlay and this window)
     models_changed = Signal()  # a package was downloaded
     closed = Signal()  # the user closed the window
     _frame_ready = Signal(object)  # BackdropFrame, emitted from the grabber thread (queued)
@@ -91,6 +92,8 @@ class ControlWindow(QQuickView):
 
         self._geometry = WindowGeometry()
         self._grabber: Optional[BackdropGrabber] = None
+        self._capture_excluded = True  # capture mode clears this; re-applied on every show
+        self._native_ready = False  # True while the platform window exists (showEvent sets, surface destruction clears)
         self._close_seen = False
         self._frame_ready.connect(self._on_backdrop_frame)
         self.windowStateChanged.connect(self._on_window_state_changed)
@@ -134,6 +137,27 @@ class ControlWindow(QQuickView):
     def grabber(self) -> Optional[BackdropGrabber]:
         return self._grabber
 
+    @property
+    def capture_excluded(self) -> bool:
+        """``False`` while capture mode lets screen-capture tools see this window."""
+        return self._capture_excluded
+
+    def set_capture_excluded(self, excluded: bool) -> None:
+        """Hide this window from screen capture (default) or make it capturable (capture mode).
+
+        The desired state is remembered and re-applied on every ``showEvent``.  While the window
+        is capturable its backdrop grabber is frozen (mss would sample the panel itself), the last
+        backdrop stays on the glass, and any frame still in flight is dropped; re-excluding resumes
+        the grabber, which forces a fresh grab.
+        """
+        self._capture_excluded = bool(excluded)
+        if self._capture_excluded:
+            self._apply_capture_affinity()  # excluded again before the grabber may sample
+            self._update_grabber()
+            return
+        self._update_grabber()  # frozen before the panel becomes visible to capture
+        self._apply_capture_affinity()
+
     def load_config(self, cfg: AppConfig) -> None:
         """Populate every control from ``cfg`` without emitting changes."""
         self.bridge.load_config(cfg)
@@ -165,13 +189,24 @@ class ControlWindow(QQuickView):
     # ---------------------------------------------------------------- events
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        win32.exclude_from_capture(self)
+        self._native_ready = True
+        self._apply_capture_affinity()
         self._refresh_geometry()
         self._update_grabber()
 
     def hideEvent(self, event: QHideEvent) -> None:
         super().hideEvent(event)
         self._update_grabber()
+
+    def event(self, event: QEvent) -> bool:
+        if (
+            isinstance(event, QPlatformSurfaceEvent)
+            and event.surfaceEventType() == QPlatformSurfaceEvent.SurfaceEventType.SurfaceAboutToBeDestroyed
+        ):
+            # close() / destroy(): applying the affinity now would re-create the native window
+            # through winId(); the stored flag is applied again by the next showEvent instead.
+            self._native_ready = False
+        return super().event(event)
 
     def exposeEvent(self, event: QExposeEvent) -> None:
         super().exposeEvent(event)
@@ -238,9 +273,14 @@ class ControlWindow(QQuickView):
             return
         self._geometry.update(win32.physical_rect(self), self.devicePixelRatio())
 
+    def _apply_capture_affinity(self) -> None:
+        """Push ``self._capture_excluded`` to the native window (stored only before the first show)."""
+        if self._native_ready:
+            win32.set_capture_excluded(self, self._capture_excluded)
+
     def _update_grabber(self) -> None:
         minimized = bool(self.windowStates() & Qt.WindowState.WindowMinimized)
-        active = self.isVisible() and not minimized and self.appearance.glassAllowed
+        active = self.isVisible() and not minimized and self.appearance.glassAllowed and self._capture_excluded
         if active:
             if self._grabber is None:
                 self._grabber = BackdropGrabber(self._geometry, self._frame_ready.emit)
@@ -256,8 +296,8 @@ class ControlWindow(QQuickView):
 
     @Slot(object)
     def _on_backdrop_frame(self, frame: object) -> None:
-        if not isinstance(frame, BackdropFrame):
-            return
+        if not isinstance(frame, BackdropFrame) or not self._capture_excluded:
+            return  # a grab still in flight when the window became capturable may contain the panel
         profile.profiler.frame_gui(frame, lambda: win32.physical_rect(self))
         self._provider.set_image(frame.image)
         profile.profiler.timed_call("push_backdrop_ms", self.bridge.push_backdrop, frame)

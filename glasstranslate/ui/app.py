@@ -101,6 +101,7 @@ class GlassTranslateApp(QObject):
         self._torn_down = False
         self.capture_mode = CaptureMode(
             self.overlay,
+            self.control,
             pipeline=lambda: self.pipeline,
             wants_running=lambda: self.cfg.running_on_start,
             status=self.control.show_status,
