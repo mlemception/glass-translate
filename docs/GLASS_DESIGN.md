@@ -674,7 +674,23 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   segmentsText, cacheText, devicesText} (the status-strip texts of the last pipeline pass), screenshot: <png path>,
   actions: {<name>: {started, finished, seconds, label, progress, models_dir, models_ready_before,
   models_ready_after}} (only when `GLASSTRANSLATE_SMOKE_ACTIONS` named a whitelisted bridge slot -
-  today just `downloadMangaOcr`; the app reports and quits by itself once the action finishes)}`.
+  `downloadMangaOcr`; the app reports and quits by itself once the action finishes),
+  quality: {setting, launcher, kind ("frozen" | "venv" | null), models_ready, hint, scheduler_active,
+  scheduler_available, scheduler_stats} (what `render/quality.find_sidecar_python` found and the
+  pipeline's scheduler state), overlay: {patch_conversions, patch_upgrades} (counters of the
+  overlay's existing patch cache: conversions of `clean_patch`, and re-conversions forced by a bumped
+  `clean_patch_serial`), paths: {config, models_dir, user_data_dir, logs} (the resolved locations,
+  under the portable folder when `portable.txt` is present)}`.  Two more whitelisted actions
+  (2026-09-11, portable bundle): `probeSidecar` launches the sidecar the app found in **fake** mode
+  through the app's own lookup + spawn code and records `actions.probeSidecar: {launcher, kind,
+  seconds, health, ok, error}`; `feedPage` (`GLASSTRANSLATE_SMOKE_PAGE=<image>`) replaces screen
+  capture with a static page so the pipeline OCRs, typesets and - with the real sidecar - upgrades
+  blocks, and records `actions.feedPage: {page, started, finished, seconds, blocks, upgraded,
+  overlay_upgrades, quality_stats, status}`; the app reports and quits once a block's serial advanced
+  and the overlay re-converted it, or at the autoexit.  Every `GLASSTRANSLATE_SMOKE_*` variable is a
+  test-harness hook: none of them does anything unless `GLASSTRANSLATE_SMOKE_LOG` is set, the action
+  names are a fixed whitelist, and the page path is validated (existing file, image suffix, ≤ 64 MiB)
+  and reported by basename only.  The control window itself is unchanged.
   The grab (`grabWindow()`, saved next to the log) runs from a single-shot timer at
   `AUTOEXIT_MS - 1500` after at least one `frameSwapped`, never from `aboutToQuit` (the window may
   already be unexposed). The assertions live in §6 (`build.py --test`) and §7 (`run.py`, offscreen).
@@ -715,6 +731,24 @@ System32/Windows/Wbem/PowerShell, no `PYTHON*`/`QT_*`/`VIRTUAL_ENV`, no inherite
   (the fallback chain re-probes the primary every 5 s; a rebuild would say `"OCR: mangaocr on ..."`), no `"Download failed"`, no secret markers, log file under the clean profile.
 - run C (onefile lifecycle): start with AUTOEXIT 60000, wait for the report, `taskkill //F //PID`,
   launch run A again and assert the stale `_MEI*` dir is gone (sweep below).
+- run `portable` (2026-09-11, `--runs portable --portable-zip … --models-zip …`; the acceptance of
+  the portable bundle, implemented in `packaging/smoke_portable.py`): both zips are unpacked into a
+  fresh folder whose path holds a space and a non-ASCII character; `PATH` = the System32 family,
+  no `PYTHON*`/`QT_*`/`VIRTUAL_ENV`, `HTTP_PROXY` = `HTTPS_PROXY` = `http://127.0.0.1:9` so any
+  network attempt fails, `LOCALAPPDATA`/`APPDATA` pointed at empty decoy folders that must stay
+  empty, and **no** `GLASSTRANSLATE_CONFIG` (the portable config path is under test; overrides go
+  to `<root>\config\config.json`).  Checks: (1) `renderer\glassrenderer.exe serve --fake` prints
+  `READY`, answers `/health` and one `/inpaint` byte-identical outside the mask, exits on stdin
+  EOF; (2) with `GT_GPU_TESTS=1` the real stages load from `<root>\models` with no download and one
+  job completes; (3) the exe from the root with `quality_renderer=auto`, `running_on_start`, Argos
+  ja→en and `GLASSTRANSLATE_SMOKE_ACTIONS=probeSidecar`: `actions.probeSidecar.ok`,
+  `quality.kind == "frozen"`, `quality.launcher` and every `paths.*` under the root, `OCR: mangaocr
+  on …` in `status_history`, `Argos packages in <root>\models` in the log and no download / URL /
+  proxy line, then runs static, A, B, C from the root, then the same launch with `renderer\`
+  renamed away: no `Engine error`/`Error:`, `quality.launcher` null (the quick fill); (4) with
+  `GT_GPU_TESTS=1`, `feedPage` on `Examples/before.jpg`: `actions.feedPage.upgraded >= 1`,
+  `overlay.patch_upgrades >= 1`, `Quality renderer: ready on cuda` in `status_history`; (5) the
+  root is moved to another space + non-ASCII path and (1) and (3) are rerun.
 Spec rules (verified in `demo/output/probes/packaging/` and the review probes): keep PySide6
 `QtCore QtGui QtWidgets QtQml QtQuick QtNetwork QtOpenGL` (QtQuickControls2 and QtQuickWidgets are
 **not** needed: no `QQuickStyle`, every control is a `QtQuick.Templates` type, §2.3); exclude every

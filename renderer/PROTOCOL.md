@@ -10,7 +10,16 @@ the whole protocol testable without a GPU.
 
 ```
 <sidecar python> -m glassrenderer serve --models-dir <dir> [--fake] [--device cuda|cpu] [--port 0]
+renderer\glassrenderer.exe serve --models-dir <dir> [--fake] [--device cuda|cpu] [--port 0]
 ```
+
+The second form is the **frozen sidecar** of the portable bundle (PyInstaller onedir built by
+`build_renderer.bat` from `packaging/glassrenderer.spec`; `glassrenderer.exe` next to its
+`_internal\` folder).  Same subcommand, arguments, environment, stdout/stderr contract and HTTP
+API; the client picks the form from the launcher it found (`render/quality.py
+find_sidecar_python`: `renderer\glassrenderer.exe` next to the app, then the configured
+interpreter or exe, then `renderer\.venv`) and runs the frozen form with the exe's directory as
+its working directory.
 
 * Environment `GT_RENDERER_TOKEN` carries the per-session token (32+ random bytes, hex).  It is
   never passed on the command line (visible in process lists).  Without it the server refuses to
@@ -100,7 +109,9 @@ blanked), then `compositing.composite(input, output, mask, feather_px)`.
 ## Models
 
 Files are downloaded by the **app** (Engines page progress row, `%LOCALAPPDATA%\GlassTranslate\
-models\quality\` in the frozen build, `<project>/models/quality/` in a checkout) from the pinned
+models\quality\` in the frozen build, `<project>/models/quality/` in a checkout, `<portable
+folder>\models\quality\` when `portable.txt` sits next to the exe) — or shipped in the portable
+models zip, which `build_portable.py` assembles from a store whose every digest it verified — from the pinned
 Hugging Face revisions listed in `renderer/MODELS.md` with the sha256 / size table shared by
 `glasstranslate/render/quality_models.py` and `glassrenderer/models.py` (a test keeps the two
 tables identical).  The sidecar never downloads anything itself.

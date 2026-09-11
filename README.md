@@ -47,6 +47,60 @@ Optional, for CUDA-accelerated translation on an NVIDIA GPU (OCR uses DirectML r
 `glasstranslate.core.gpu.prepare_cuda_path()` adds the pip-installed CUDA DLL folders to the
 DLL search path before CTranslate2 is imported, so no system-wide CUDA install is needed.
 
+## Portable bundle (no installer, no Python, no network)
+
+Two zips ship the whole thing for a machine that has nothing installed:
+
+| Zip | Unpacks to | Holds |
+|---|---|---|
+| `GlassTranslate-<version>-portable-win64.zip` | `GlassTranslate-<version>\` | `GlassTranslate.exe` (torch-free onefile build), `renderer\glassrenderer.exe` + `_internal\` (the quality-renderer sidecar frozen with torch cu130, diffusers, transformers and the CUDA/cuDNN DLLs), `portable.txt`, `README-portable.txt`, `licenses\` |
+| `GlassTranslate-<version>-models-win64.zip` | the same folder | `models\` — the complete quality store (24 pinned files, 9.3 GB), the manga-ocr ONNX bundle and the translation packs the build machine holds (Argos `ja_en` and `translate-en_de-1_3`, Sugoi `sugoi-v4-ja-en`), laid out as the app's model store; `models\MANIFEST.json` lists every file with its digest, each pack's licence and source, and the offered language pairs that are **not** covered. The bundle is built for personal use on the machine that built it: the Sugoi pack's licence forbids redistribution (see below), so pass `--no-research-models` to `build_portable.py` for a zip that will be shared |
+
+Extract both into the same place and start `GlassTranslate.exe`. Each zip has a
+`<zip>.sha256` next to it (`sha256sum -c` format).
+
+**The portable rule.** When a file named `portable.txt` sits next to `GlassTranslate.exe`, the app,
+its download workers and the sidecar keep everything under that folder instead of the user
+profile: `models\`, `config\config.json`, `config\secrets.json`, `logs\glasstranslate.log`,
+`logs\renderer.log`, and Qt's own QML compilation cache under `cache\qmlcache` (Qt's automatic
+pipeline cache is turned off in portable mode, so nothing lands in `%LOCALAPPDATA%\GlassTranslate`
+either). Mind that `config\secrets.json` then holds the Gemini key in plain text
+inside a folder you may copy around: delete it before handing the folder on. `models_dir` is
+stored relative to the folder (and confined to it), so the folder can be moved
+or put on a USB stick and the settings still point at the right store. Without the marker
+nothing changes (`%LOCALAPPDATA%\GlassTranslate` and `%APPDATA%\GlassTranslate\config.json` as
+before). The rule lives in one place, `glasstranslate/config/settings.py` (`portable_root()`).
+The marker also works next to `run.py` in a source checkout. One thing is outside the app's
+control: Windows and the GPU driver keep their own shader caches in the profile
+(`AppData\Local\D3DSCache`, `NVIDIA\DXCache`, `AMD\DxCache`, `NVIDIA\ComputeCache`) and the
+NVIDIA driver drops an `NVIDIA Corporation\` folder next to the exe when DirectML or CUDA is
+used; those are the OS's and the driver's, not GlassTranslate data, and the acceptance run
+tolerates exactly those names and nothing else.
+
+**Sidecar lookup order** (`render/quality.py find_sidecar_python`): `renderer\glassrenderer.exe`
+next to the running exe, then the *Engines → sidecar interpreter* setting (an interpreter or a
+`glassrenderer.exe`), then `renderer\.venv` in a checkout, then `%LOCALAPPDATA%\GlassTranslate\
+renderer\.venv`. The frozen sidecar is launched as `glassrenderer.exe serve --models-dir …`;
+token, loopback binding, stdin polling and the offline environment are the same as for the venv
+form (`renderer/PROTOCOL.md`).
+
+Building the bundle (developer machine, from the local stores, nothing is downloaded):
+
+```bat
+build.bat --no-test          :: dist\GlassTranslate.exe
+build_renderer.bat           :: dist\renderer\  (PyInstaller onedir freeze of renderer\glassrenderer from renderer\.venv)
+build_portable.bat           :: verifies every model digest, assembles and zips both artefacts, writes the .sha256 files
+.venv\Scripts\python packaging\smoke_test.py --runs portable --portable-zip dist\GlassTranslate-<v>-portable-win64.zip --models-zip dist\GlassTranslate-<v>-models-win64.zip
+```
+
+The `portable` smoke run is the acceptance test: it unpacks both zips into a folder whose path
+has a space and a non-ASCII character, strips `PATH` to System32, points `HTTP(S)_PROXY` at a
+dead port so any network attempt fails, and checks the frozen sidecar (fake mode; the real
+stages with `GT_GPU_TESTS=1`), the exe with `quality_renderer=auto` (runs static, A, B, C, the
+sidecar probe, zero download attempts in the log, the quick-fill fallback with `renderer\`
+removed), the end-to-end sidecar patch on a manga page (`GT_GPU_TESTS=1`) and a relocation of
+the folder. Sizes and timings: `docs/perf/2026-09-11-portable-bundle.md`.
+
 ## Translation models
 
 Models live in `models/` by default (configurable via `models_dir`). **No model is checked
@@ -65,6 +119,12 @@ on-disk layouts are recognised:
 
 The generic Argos `ja -> en` package is trained on web text and falls apart on the short,
 colloquial lines in speech bubbles (it returns `<unk>` for things like うるさい or やめろ).
+Licence note: the CTranslate2 conversion the Engines page downloads
+(`entai2965/sugoi-v4-ja-en-ctranslate2`) is published under NTT's research licence
+(`license: other`, `ntt-license`): redistribution for research only and no commercial use.
+The portable models zip therefore includes it only for personal use on the machine that built
+the bundle; build a zip meant for others with `build_portable.py --no-research-models`, which
+leaves the pack out and records that in `models\MANIFEST.json`.
 Sugoi v4 is trained on game and visual-novel dialogue and handles them well. Install it with
 the "Get Sugoi (ja→en)…" button in the control window, or from a shell:
 

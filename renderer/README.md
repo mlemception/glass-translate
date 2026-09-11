@@ -40,6 +40,22 @@ The model files are not fetched here.  The app downloads them through the Engine
 `%LOCALAPPDATA%\GlassTranslate\models\quality\` (`<project>\models\quality\` in a checkout); the
 sidecar only reads them and has no network requirement at run time.  See `MODELS.md`.
 
+## Frozen sidecar (portable bundle)
+
+`build_renderer.bat` (project root) freezes this package from `renderer\.venv` with PyInstaller
+(`packaging\glassrenderer.spec`, onedir, console subsystem so `READY` on stdout and the stdin
+watcher keep working) into `dist\renderer\`: `glassrenderer.exe` plus `_internal\` with torch
+cu130, the CUDA/cuDNN DLLs, diffusers, transformers, tokenizers, safetensors, OpenCV and
+`glassrenderer\models.json`.  The spec measures the bundle before pruning and drops what the
+stages never import (headers, import libraries, test packages, torchvision, the profiler DLLs);
+a pefile closure check fails the build if a kept DLL imports a pruned one, and the build ends
+with a `serve --fake` self-check.  `build_portable.bat` then puts that folder next to
+`GlassTranslate.exe` in the portable zip.  The app launches it as
+`renderer\glassrenderer.exe serve --models-dir …` (same contract, `PROTOCOL.md`), and a
+`portable.txt` next to the app keeps the models under `<folder>\models\quality\` and this
+process's stderr under `<folder>\logs\renderer.log`.  Library licences of the frozen tree are
+listed in the bundle's `licenses\LICENSES.md`; model licences stay in `MODELS.md`.
+
 ## Run
 
 The app spawns the sidecar itself.  To drive it by hand:
