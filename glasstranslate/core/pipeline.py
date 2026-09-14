@@ -742,16 +742,21 @@ class Pipeline(threading.Thread):
 
         # TODO(low-confidence lines): ``build_blocks`` takes an optional
         # ``all_segments`` - the OCR lines of *any* confidence, a superset of
-        # ``segments`` - so the eraser can use the boxes the confidence filter
-        # dropped as evidence of glyphs (``demo/typeset_dev.py`` passes them).
-        # ``RapidOCREngine.recognize`` drops lines below ``cfg.min_confidence``
-        # itself (and RapidOCR's ``Global.text_score`` is set to the same
-        # value), so only confident lines ever reach this point.  To thread
-        # them through: have the engine return every line, keep the confident
-        # subset for grouping/translation and call
-        # ``build_blocks(frame.image, confident, all_segments=every_line)``.
-        # ``erase.apply`` currently ignores the extra lines (its column sweep
-        # completes glyphs from the ink alone), so nothing is lost today.
+        # ``segments`` - and ``erase.apply`` now reads it: a line no block
+        # owns is erased as that block's own ink and never translated
+        # (``render/erase._evidence``).  ``demo/typeset_dev.py`` passes it and
+        # the ruby it recovers is real - 4ja returns ``めぐみ`` at 0.26 against
+        # a floor of 0.5 while the kanji it reads comes back at 0.56, and its
+        # ink used to stay on the page under the English.
+        # The live app still cannot pass it.  ``RapidOCREngine.recognize``
+        # drops lines below ``cfg.min_confidence`` itself *and* hands the same
+        # value to RapidOCR as ``Global.text_score``, so the dropped lines are
+        # never detected, let alone returned; ``MangaOcrEngine.recognize``
+        # drops its detector boxes on the same threshold.  Threading them
+        # through needs a second channel on the engine protocol (the confident
+        # subset must keep driving grouping and translation) and a lower
+        # ``text_score`` that provably does not change what the confident pass
+        # finds - an OCR change with its own tests, not made here.
         blocks = build_blocks(frame.image, segments) if segments else []
         return [b.segment for b in blocks], [b.style for b in blocks]
 

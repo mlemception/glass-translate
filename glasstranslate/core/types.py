@@ -113,8 +113,16 @@ class SegmentStyle:
     # Font pixel size ceiling derived from the source glyph size so that all
     # blocks on a page share a consistent scale; None = no ceiling.
     max_font_px: Optional[float] = None
-    # Quads of the OCR lines this block was assembled from (N, 4, 2); used by
-    # debug views.  None for plain single-line segments.
+    # Quads of the OCR lines whose ink this block covers (N, 4, 2): its member
+    # lines *and* its furigana, which is more than the block was assembled
+    # from - ruby is erased with the block but never translated.  The
+    # footprint they span is what ``render/place._source_rect`` anchors
+    # free-text lettering on (``src``, its ``centre``, and the ``must_cover``
+    # test for horizontal captions), and it has to be the ink that was erased
+    # rather than the text that was read, or the lettering is placed off the
+    # hole it is filling.  Including the ruby therefore moves a captioned
+    # block's centre by about half the ruby's depth, deliberately.  None for
+    # plain single-line segments.
     source_quads: Optional[np.ndarray] = None
     # Preferred footprint for text that is not inside a bubble: the renderer
     # lays the translation out here first and only grows the box (towards

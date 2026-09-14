@@ -289,3 +289,81 @@ def test_erase_block_masked_and_erase_block_agree():
     patch2, rect2, outline2, mask = erase.erase_block_masked(img, block)
     assert rect == rect2 and outline == outline2 and np.array_equal(patch, patch2)
     assert mask.shape == (rect.h, rect.w)
+
+
+# ------------------------------------------------------- glyphs nobody reported
+def _redrawn(img: np.ndarray, block: TextBlock) -> np.ndarray:
+    """The page with ``block``'s clean patch painted back on."""
+    patch, rect, _flag = erase.erase_block(img, block)
+    out = img.copy()
+    out[rect.y : rect.y2, rect.x : rect.x2] = patch
+    return out
+
+
+def _ink(page: np.ndarray, rect: Rect) -> int:
+    return int((_gray(page)[rect.y : rect.y2, rect.x : rect.x2] < PAPER - 20).sum())
+
+
+def test_a_column_the_detector_never_reported_is_erased_inside_the_balloon(monkeypatch):
+    """Whole columns go missing from the OCR - 1ja returns one of the five in
+    one balloon - and a column that far out is well past the zone the reported
+    boxes grow (``BUBBLE_ZONE_EM``).  Inside a balloon there is nothing but
+    paper and lettering, so ``BUBBLE_STRAY_INSIDE`` lets the fill follow
+    glyph-sized ink across the interior to reach it."""
+    img, _interior, _outline, _tail, bubble, box = _bubble_page("round")
+    missed = _draw_column(img, 252, 150, 3, 24)
+    assert missed.x - box.x2 > erase.BUBBLE_ZONE_EM * 24  # out of reach of the boxes' own zone
+    assert _ink(img, missed) > 0
+    block = _block(box, 24.0, bubble=bubble)
+    assert _ink(_redrawn(img, block), missed) == 0
+    # ...and it is that rule doing it: with nothing able to qualify, it stays.
+    monkeypatch.setattr(erase, "BUBBLE_STRAY_INSIDE", 2.0)
+    assert _ink(_redrawn(img, block), missed) > 0
+
+
+def test_art_at_the_same_reach_is_too_big_for_the_stray_rule():
+    """The escape that keeps the rule selective rather than "erase everything
+    on the interior": what it collects has to be glyph sized.  This shape sits
+    exactly as far out as the missed column above - 4ja's chibi, whose head
+    reaches into a balloon - and is bigger than a glyph, so the fill never
+    follows it and the art stays."""
+    img, _interior, _outline, _tail, bubble, box = _bubble_page("round")
+    art = Rect(250, 145, 57, 57)
+    cv2.circle(img, (278, 173), 27, (0, 0, 0), 2)
+    assert art.x - box.x2 > erase.BUBBLE_ZONE_EM * 24  # the same reach as the missed column
+    assert art.w > erase.GLYPH_MAX * 24  # ...but not a glyph
+    assert _ink(_redrawn(img, _block(box, 24.0, bubble=bubble)), art) > 0
+
+
+# ------------------------------------------------------- overlapping patches
+def _compose(img: np.ndarray, blocks) -> np.ndarray:
+    """The page with every block's clean patch painted on, in the order given."""
+    out = img.copy()
+    for blk in blocks:
+        r = blk.style.clean_rect
+        out[r.y : r.y2, r.x : r.x2] = blk.style.clean_patch
+    return out
+
+
+def test_overlapping_patches_do_not_repaint_each_others_glyphs(monkeypatch):
+    """Two columns close enough that their clean rects overlap.  Neither block
+    erases the other's glyphs (they are ``foreign``), so each patch still
+    carries them: painted in the wrong order the later patch puts the erased
+    ink back (2ja: the ``E`` of ``SASUKE`` came back once the balloon beside it
+    grew).  ``_share_erased`` hands every patch what the others erased inside
+    it, so the painting order stops mattering."""
+    img = _page()
+    a = _draw_column(img, 150, 120, 3, 24)
+    b = _draw_column(img, 178, 120, 3, 24)  # four pixels of paper between the columns
+    blocks = [_block(a, 24.0), _block(b, 24.0)]
+    erase.apply(img, blocks)
+    assert blocks[0].style.clean_rect.intersects(blocks[1].style.clean_rect)
+    page = _compose(img, blocks)
+    assert np.array_equal(page, _compose(img, blocks[::-1]))
+    assert _ink(page, Rect(a.x, a.y, b.x2 - a.x, a.h)) == 0  # both columns gone, either way round
+
+    # ...and without the step the two orders really do differ.
+    monkeypatch.setattr(erase, "_share_erased", lambda blocks: None)
+    raw = [_block(a, 24.0), _block(b, 24.0)]
+    erase.apply(img, raw)
+    assert not np.array_equal(_compose(img, raw), _compose(img, raw[::-1]))

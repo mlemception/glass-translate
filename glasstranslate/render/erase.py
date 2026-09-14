@@ -55,7 +55,7 @@ import cv2
 import numpy as np
 
 from ..core.types import RGB, Rect, Segment
-from .layout import TextBlock
+from .layout import TextBlock, glyph_em
 
 # --- tunables --------------------------------------------------------------
 PAD = 2  # px added around OCR boxes when deciding what is "inside" a line
@@ -108,6 +108,33 @@ OUTLINE_FRINGE = 1  # px of anti-aliased edge kept with a bubble outline
 # Bubbles: the paper fill reaches this many glyphs beyond the text boxes (strays and furigana
 # next to the column are filled; art drawn across the balloon farther away is kept).
 BUBBLE_ZONE_EM = 1.5
+# ...and, however far from the boxes, over any glyph-sized ink component
+# lying this far inside the paper interior: a balloon holds paper and
+# lettering and nothing else, while whole columns go missing from the OCR
+# (1ja returns one of the five columns of one balloon, so the zone around the
+# box it did return reaches nowhere near the rest).  Art drawn across a
+# balloon is larger than a glyph or joined to the outline, so it is not
+# collected here and the zone still keeps it.
+BUBBLE_STRAY_INSIDE = 0.9
+# Low-confidence OCR lines as erase evidence (:func:`apply`).  Ruby is the
+# smallest, faintest thing on a page, so it is the first line the detector
+# loses to the confidence floor - 4ja returns ``めぐみ`` at 0.26 against a floor
+# of 0.5 while its kanji comes back at 0.56.  A dropped line counts as a
+# block's own ink when it is not already covered by anybody's boxes, sits
+# within this many ems of that block's source footprint...
+EVIDENCE_REACH_EM = 1.5
+# ...and its own characters are smaller than this fraction of the block's em.
+# The test is on the character em (``layout.glyph_em``), never on the box: a
+# Japanese column is one em wide however long it runs, so a box measure calls
+# a whole un-grouped column of speech the same size as the ruby beside it and
+# erases it untranslated (3jp drops ``っーか`` at 0.41, one full-size kana
+# column, right next to the block that should have had it).  The ratio is
+# ``layout._FURIGANA_MAX_EM_RATIO``: dropped ink that belongs to a block is
+# ruby or a stray mark, and both are printed well under the text they sit by.
+EVIDENCE_MAX_EM_RATIO = 0.78
+# A dropped line this far covered by the blocks' own boxes is one of them
+# (the same line, re-offered), not new evidence.
+EVIDENCE_COVERED = 0.6
 OUTLINE_REACH = 0.3  # glyphs around the source footprint checked for remaining art
 OUTLINE_MIN_INK = 40  # kept ink pixels in that area that make the block "over art"
 WINDOW_ALONG = 0.5  # window margin along the reading axis beyond the sweep reach (glyphs)
@@ -766,17 +793,24 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
     outline.  The outline - the large ink components bordering the interior
     from outside, tails included - and its ``OUTLINE_FRINGE`` px anti-aliased
     edge are copied from the source untouched, so it keeps its own thickness.
-    Nothing outside the outline is touched, and nothing farther than
-    ``BUBBLE_ZONE_EM`` glyphs from the text boxes either: a character drawn across
-    the balloon's edge (4ja: a chibi whose head reaches into the balloon) is art,
-    not a stray glyph, and stays."""
+    Nothing outside the outline is touched.
+
+    Inside it the fill reaches ``BUBBLE_ZONE_EM`` glyphs past the text boxes,
+    and then as far as the lettering goes: any ink component of glyph size
+    (``GLYPH_MAX``) lying ``BUBBLE_STRAY_INSIDE`` inside the interior, clear of
+    the window edge, extends the zone to itself, because a balloon holds paper
+    and lettering and nothing else and whole columns go missing from the OCR
+    (1ja returns one of the five columns of one balloon).  Art drawn across the
+    balloon's edge - 4ja's chibi, whose head reaches in - is larger than a
+    glyph or joined to the outline, fails that escape, stays outside the zone
+    and survives."""
     gray = ctx.gray
     h, w = gray.shape
     ink = _ink_mask(gray, ctx.fg_l, ctx.bg_l)
     comps = _Components(ink)
     own = _paint((h, w), ctx.main + ctx.furi, PAD)
     zone_pad = max(PAD, int(round(BUBBLE_ZONE_EM * max(ctx.glyph, 1.0))))
-    zone = _paint((h, w), ctx.main + ctx.furi, zone_pad).astype(bool)
+    zone = _paint((h, w), ctx.main + ctx.furi, zone_pad)
     big = comps.maxdim >= OUTLINE_MIN * min(h, w)
     big[0] = False
     big_mask = comps.mask_of(big)
@@ -802,7 +836,16 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
     adjacent[np.unique(comps.labels[_dilate(interior, 1) & (ink > 0)])] = True
     inside = _fraction_inside(comps.labels, interior.view(np.uint8), comps.area)
     outline = comps.mask_of(adjacent & big & (inside < 0.5))
-    erase = interior & zone & ~_dilate(outline, OUTLINE_FRINGE)
+
+    # The columns the detector never reported: glyph-sized ink lying on the
+    # interior and clear of the outline is lettering wherever it is, so the
+    # zone follows it out to the far side of the balloon.
+    stray = ~big & ~comps.touch & (comps.maxdim <= GLYPH_MAX * max(ctx.glyph, 1.0))
+    stray &= inside >= BUBBLE_STRAY_INSIDE
+    stray[0] = False
+    if stray.any():
+        _paint_into(zone, comps.rects(stray), PAD)
+    erase = interior & zone.astype(bool) & ~_dilate(outline, OUTLINE_FRINGE)
     kept = ink.astype(bool) & ~erase
     empty = np.zeros((h, w), dtype=bool)
     return _Analysis(erase, kept, empty, None)
@@ -818,19 +861,80 @@ def _no_mask(rect: Rect) -> np.ndarray:
     return np.zeros((max(0, rect.h), max(0, rect.w)), dtype=bool)
 
 
+def _gap(a: Rect, b: Rect) -> float:
+    """Distance between two rectangles; 0 when they touch or overlap."""
+    dx = max(0, b.x - a.x2, a.x - b.x2)
+    dy = max(0, b.y - a.y2, a.y - b.y2)
+    return float(np.hypot(dx, dy))
+
+
+def _covered(box: Rect, boxes: Sequence[Rect]) -> float:
+    """Largest fraction of ``box`` that any single rectangle of ``boxes``
+    covers."""
+    area = float(max(1, box.w * box.h))
+    best = 0.0
+    for other in boxes:
+        iw = min(box.x2, other.x2) - max(box.x, other.x)
+        ih = min(box.y2, other.y2) - max(box.y, other.y)
+        if iw > 0 and ih > 0:
+            best = max(best, iw * ih / area)
+    return best
+
+
+def _evidence(
+    blocks: Sequence[TextBlock], all_segments: Sequence[Segment], width: int, height: int
+) -> List[List[Rect]]:
+    """Per block, the boxes of ``all_segments`` that no block owns: the lines
+    the detector did see and the confidence floor dropped, ruby first of all.
+    They are the block's ink and nothing else - they never reach its text -
+    so the eraser treats them exactly like its furigana boxes.  Each goes to
+    the one block it is nearest, and only when its characters are small enough
+    and it is close enough to be that block's own ruby or strays
+    (``EVIDENCE_MAX_EM_RATIO`` / ``EVIDENCE_REACH_EM``).  A line printed at
+    the block's own size is a line of speech the grouping did not get, not
+    ink to paint over, and is left alone."""
+    out: List[List[Rect]] = [[] for _ in blocks]
+    if not all_segments or not blocks:
+        return out
+    owned: List[Rect] = []
+    sources: List[Rect] = []
+    for b in blocks:
+        main, furi = _boxes(b)
+        own = [r.clamp(width, height) for r in main + furi if r.w > 0 and r.h > 0]
+        owned.extend(own)
+        sources.append(_union(own) if own else b.segment.bbox.clamp(width, height))
+    ems = [max(1.0, float(b.em_px) or float(b.style.text_height_px)) for b in blocks]
+    for seg in all_segments:
+        box = seg.bbox.clamp(width, height)
+        if box.w <= 0 or box.h <= 0 or _covered(box, owned) >= EVIDENCE_COVERED:
+            continue
+        em_seg = glyph_em(seg)
+        best: Optional[Tuple[float, int]] = None
+        for i, em in enumerate(ems):
+            if em_seg >= EVIDENCE_MAX_EM_RATIO * em:
+                continue
+            dist = _gap(box, sources[i])
+            if dist <= EVIDENCE_REACH_EM * em and (best is None or dist < best[0]):
+                best = (dist, i)
+        if best is not None:
+            out[best[1]].append(box)
+    return out
+
+
 def erase_block(
     img_bgr: np.ndarray,
     block: TextBlock,
     gray: Optional[np.ndarray] = None,
     foreign: Sequence[Rect] = (),
     glyph: Optional[float] = None,
+    extra: Sequence[Rect] = (),
 ) -> Tuple[np.ndarray, Rect, bool]:
     """Erase the source glyphs of ``block``: ``(patch, rect, outline)``.
 
     See :func:`erase_block_masked`, of which this is the three-value form kept
     for every existing caller.
     """
-    patch, rect, outline, _mask = erase_block_masked(img_bgr, block, gray, foreign, glyph)
+    patch, rect, outline, _mask = erase_block_masked(img_bgr, block, gray, foreign, glyph, extra)
     return patch, rect, outline
 
 
@@ -840,6 +944,7 @@ def erase_block_masked(
     gray: Optional[np.ndarray] = None,
     foreign: Sequence[Rect] = (),
     glyph: Optional[float] = None,
+    extra: Sequence[Rect] = (),
 ) -> Tuple[np.ndarray, Rect, bool, np.ndarray]:
     """Erase the source glyphs of ``block``.
 
@@ -852,7 +957,9 @@ def erase_block_masked(
     (``render/quality.py``).  ``gray`` may be the page's grey image (saves a
     conversion); ``foreign`` are the OCR boxes of the other blocks, which are
     never erased; ``glyph`` overrides the block's glyph size
-    (``style.text_height_px``).
+    (``style.text_height_px``); ``extra`` are further boxes of this block's own
+    ink - the low-confidence lines :func:`_evidence` hands it - erased like its
+    furigana and, like it, never translated.
     """
     height, width = img_bgr.shape[:2]
     if gray is None:
@@ -861,6 +968,7 @@ def erase_block_masked(
     main, furi = _boxes(block)
     main = [r.clamp(width, height) for r in main if r.w > 0 and r.h > 0]
     furi = [r.clamp(width, height) for r in furi if r.w > 0 and r.h > 0]
+    furi += [r.clamp(width, height) for r in extra if r.w > 0 and r.h > 0]
     source = _union(main + furi) if (main or furi) else block.segment.bbox.clamp(width, height)
     if not main:
         main = [source]
@@ -932,31 +1040,65 @@ def erase_block_masked(
     return patch, rect, outline, np.ascontiguousarray(erase_l)
 
 
+def _share_erased(blocks: Sequence[TextBlock]) -> None:
+    """Keep a block's erase out of its neighbour's patch.  Two blocks in one
+    corner of a page can end up with overlapping ``clean_rect``s, and a
+    renderer paints them one after another: in the overlap the last patch
+    wins and puts the other block's glyphs back on the page (2ja: the ``E`` of
+    ``SASUKE`` came back once the balloon beside it grew).  Every patch takes
+    over what the others erased inside it, so the painting order stops
+    mattering.  ``erase_mask`` is left alone - it is this block's own glyph
+    classification, and the quality renderer regenerates exactly that."""
+    for i, a in enumerate(blocks):
+        ra, ma, pa = a.style.clean_rect, a.style.erase_mask, a.style.clean_patch
+        if ra is None or ma is None or pa is None:
+            continue
+        for b in blocks[i + 1 :]:
+            rb, mb, pb = b.style.clean_rect, b.style.erase_mask, b.style.clean_patch
+            if rb is None or mb is None or pb is None:
+                continue
+            x, y = max(ra.x, rb.x), max(ra.y, rb.y)
+            x2, y2 = min(ra.x2, rb.x2), min(ra.y2, rb.y2)
+            if x2 <= x or y2 <= y:
+                continue
+            sa = (slice(y - ra.y, y2 - ra.y), slice(x - ra.x, x2 - ra.x))
+            sb = (slice(y - rb.y, y2 - rb.y), slice(x - rb.x, x2 - rb.x))
+            only_a, only_b = ma[sa] & ~mb[sb], mb[sb] & ~ma[sa]
+            pb[sb][only_a] = pa[sa][only_a]
+            pa[sa][only_b] = pb[sb][only_b]
+
+
 def apply(
     img_bgr: np.ndarray, blocks: List[TextBlock], all_segments: Sequence[Segment] = (), gray: Optional[np.ndarray] = None
 ) -> None:
     """Recompute ``clean_patch``, ``clean_rect``, ``outline`` and
-    ``erase_mask`` of every block in place.  ``all_segments`` (the raw OCR
-    lines of any confidence) is accepted for interface compatibility; glyph
-    completion works from the ink alone.  ``gray`` may be the page's grey
+    ``erase_mask`` of every block in place.  ``all_segments`` - the raw OCR
+    lines of *any* confidence, a superset of the lines the blocks were built
+    from - is read as evidence of ink: whatever in it no block owns goes to
+    the block it belongs to (:func:`_evidence`) and is erased with that
+    block's own glyphs, never translated.  ``gray`` may be the page's grey
     image (saves a conversion)."""
-    del all_segments
     if not blocks:
         return
     if gray is None:
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    height, width = img_bgr.shape[:2]
+    evidence = _evidence(blocks, all_segments, width, height)
     boxes_per_block: List[List[Rect]] = []
-    for b in blocks:
+    for i, b in enumerate(blocks):
         main, furi = _boxes(b)
-        boxes_per_block.append(main + furi)
+        boxes_per_block.append(main + furi + evidence[i])
     median = float(np.median([b.style.text_height_px for b in blocks]))
     for i, b in enumerate(blocks):
         foreign = [r for j, rs in enumerate(boxes_per_block) if j != i for r in rs]
         g = b.style.text_height_px
         if len(blocks) >= 3:
             g = min(g, GLYPH_CAP * median)
-        patch, rect, outline, mask = erase_block_masked(img_bgr, b, gray=gray, foreign=foreign, glyph=g)
+        patch, rect, outline, mask = erase_block_masked(
+            img_bgr, b, gray=gray, foreign=foreign, glyph=g, extra=evidence[i]
+        )
         b.style.clean_patch = patch
         b.style.clean_rect = rect
         b.style.outline = outline
         b.style.erase_mask = mask
+    _share_erased(blocks)

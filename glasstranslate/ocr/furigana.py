@@ -9,7 +9,13 @@ at recognition time and does not need this.
 
 Manga mode has its own pixel-aware rule in ``render/layout.py``
 (``_mark_furigana``), which also feeds the eraser with the ruby boxes; this
-module deliberately does not replace it.
+module deliberately does not replace it.  That rule is the stricter of the
+two: it asks the annotated line to carry a kanji, because what it flags is
+dropped from the translation and a kana column standing beside a slightly
+bigger kana one is speech, not ruby.  The deliberate cost is that a kana gloss
+printed beside a katakana or Latin word is not recognised there and is
+translated as a line of its own; this module, which only filters text, still
+takes it.
 
 Only axis-aligned bounding boxes (``Segment.bbox``) are considered; rotated
 text is left alone.
