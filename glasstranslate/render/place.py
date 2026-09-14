@@ -656,7 +656,23 @@ def typeset_block(text: str, style: SegmentStyle, measure: Measure, *, min_size:
     if not words:
         return Typeset(ceiling, ceiling, [], True)
     if style.in_bubble or (style.layout_seed is None and style.search_box is None):
-        return typeset_lobes(text, _block_spans(style, box), float(box.y), measure, max_size=ceiling, min_size=min_size, lang=lang)
+        spans = _block_spans(style, box)
+        if style.in_bubble and not style.vertical:
+            # A horizontal source is a *line* - a caption band's text sits on
+            # a printed rule and the letterer keeps the English on it - so the
+            # block is anchored where the Japanese was, exactly as a
+            # horizontal free-text caption is by ``must_cover`` below.  The
+            # optical centre is the middle of the *shape*, which on a band the
+            # text fills a third of (1ja's caption strip: 660 x 152 of band
+            # for Japanese 86 px deep) drops the lettering ~17 px below its
+            # own rule.  Vertical text runs the height of its balloon and so
+            # says nothing about where the English belongs; those keep the
+            # optical centre, and a balloon its text does fill gives the same
+            # answer either way.
+            src = _source_rect(style)
+            return typeset(text, spans, float(box.y), measure, max_size=ceiling, min_size=min_size,
+                           anchor_y=src.y + src.h / 2.0, lang=lang)
+        return typeset_lobes(text, spans, float(box.y), measure, max_size=ceiling, min_size=min_size, lang=lang)
 
     search, ii_ink, ii_blocked = _maps(style, box, ceiling)
     src = _source_rect(style)
