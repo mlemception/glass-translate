@@ -24,3 +24,6 @@ renderer/.venv/
 /portable.txt
 /config/
 /logs/
+# Local corpus of third-party volumes used to eyeball the typesetter (~16 GB of
+# .cbz/.rar).  Anchored to the repo root; never committed.
+/JA vs. EN/
