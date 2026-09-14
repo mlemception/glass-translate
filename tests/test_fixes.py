@@ -77,10 +77,21 @@ def test_fallback_centres_on_the_filled_rows():
 
 
 # ------------------------------------------------------------ vectorised spans / budgets
-def _mask_spans_reference(mask, rect, cx=None):
+def _optical_column(mask):
+    """The mask's optical centre column, in mask coordinates: the x of its
+    distance transform's peak, padded so a region touching the edge of the
+    array does not peak on the border.  Spelled out here rather than imported
+    so the reference stays independent of the code under test."""
+    if not mask.any():
+        return mask.shape[1] / 2.0
+    dt = cv2.distanceTransform(np.pad(mask.astype(bool), 1).view(np.uint8), cv2.DIST_L2, 5)
+    return float(np.nonzero(dt >= dt.max() - 1e-6)[1].mean()) - 1.0
+
+
+def _mask_spans_reference(mask, rect, centre):
+    """``centre`` is in mask coordinates; ``mask_spans`` takes a page ``cx``."""
     h, w = mask.shape[:2]
     spans = np.zeros((h, 2), dtype=np.float64)
-    centre = (rect.w / 2.0) if cx is None else (cx - rect.x)
     for r in range(h):
         row = mask[r]
         if not row.any():
@@ -106,7 +117,10 @@ def test_mask_spans_matches_per_row_reference():
         mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, 5), np.uint8)).astype(bool)
         mask[rng.integers(0, 40, 3)] = False  # some empty rows
         for cx in (None, 17.0, 40.5, 90.0):
-            np.testing.assert_array_equal(T.mask_spans(mask, rect, cx), _mask_spans_reference(mask, rect, cx))
+            # cx=None means the mask's own optical column, not the rect centre:
+            # the balloon may sit off to one side of the box the layout cut.
+            centre = _optical_column(mask) if cx is None else cx - rect.x
+            np.testing.assert_array_equal(T.mask_spans(mask, rect, cx), _mask_spans_reference(mask, rect, centre))
 
 
 def test_spans_budgets_match_line_budget():

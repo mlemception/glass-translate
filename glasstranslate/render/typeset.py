@@ -30,7 +30,10 @@ typesetting:
   ``_FORCE_SPLIT_SCALE`` of the ceiling;
 * lines are balanced (a dynamic programme evens out their fill, so no
   single word is left alone on the last line when a rebreak avoids it);
-* the line block is centred on the region (or on the caller's anchor);
+* the line block is centred on the region's *optical* centre - the middle
+  of the largest circle inscribed in it, not the middle of its bounding box,
+  which a tail or a flat side drags off the balloon - or on the caller's
+  anchor when it passes one (:mod:`.anchor`);
 * a region made of two joined boxes (two lobes, e.g. two caption boxes
   sharing an edge) holding a sentence with an ellipsis boundary
   (``... ...``) gets the first part in the upper box and the rest in the
@@ -58,6 +61,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from ..core.types import Rect
+from .anchor import ANCHOR_SLACK_EM, Placement, ink_centre, interior_centre, line_centre, spans_centre
 from .fit import Measure
 
 try:  # dictionary hyphenation; optional so the package imports without it
@@ -108,13 +112,18 @@ _LOBE_MIN_SCALE = 0.85
 _ELLIPSIS_BOUNDARY = re.compile(r"(\.{3}|…)\s+(?=(\.{3}|…))")
 # Minimum letters left on each side of a hyphen.
 _HYPHEN_MIN_SIDE = 2
-# Width scale factors tried (largest first) when balancing line lengths.
-_BALANCE_FACTORS = tuple(round(1.0 - 0.05 * i, 2) for i in range(9))  # 1.0 .. 0.6
-# A block wider than this many times its height gets an extra line instead,
-# when that still fits: comic lettering is oval, not a banner.
-_MAX_ASPECT = 2.2
 # Characters stripped from a word before looking it up for hyphenation.
 _WORD_PUNCT = ".,;:!?\"'()[]…-–—“”‘’"
+# A block that cannot be centred at one size may be centred a size or two
+# smaller: a balloon whose wide part is short holds fewer big lines than
+# small ones, and the big block can only sit above it.  Every em the block
+# inks away from the anchor, past the ``anchor.ANCHOR_SLACK_EM`` a centred
+# block is allowed, costs this fraction of the size - the same price as a
+# hyphen, so one ``_SIZE_STEP`` step buys about 0.7 em of centring and no
+# more.  Measured over the five reference pages, 0.1 is the knee: it moves
+# four more blocks inside 0.25 em and three out of the 0.6 em tail for one
+# per cent of cap height, and paying more only shrinks more blocks.
+_OFF_CENTRE_SIZE_COST = 0.1
 # Line widths are floored to this many pixels before flowing, so nearby
 # vertical offsets of the same block share one cached flow (conservative:
 # a flow that fits the floored widths fits the real ones).
@@ -260,8 +269,15 @@ def rect_spans(rect: Rect) -> np.ndarray:
 def mask_spans(mask: np.ndarray, rect: Rect, cx: Optional[float] = None) -> np.ndarray:
     """Row spans of a boolean ``mask`` (shape ``rect.h x rect.w``) placed at
     ``rect``.  For each row the run of True pixels containing ``cx`` (default:
-    the rect centre) is used; when that column is False the run nearest to
-    ``cx`` is taken; rows with no True pixel get a zero-width span.  Runs are
+    the mask's optical centre column, :func:`.anchor.interior_centre`) is
+    used; when that column is False the run nearest to ``cx`` is taken; rows
+    with no True pixel get a zero-width span.  The optical column is the
+    balloon's own, where the rect centre is only the middle of the box the
+    layout cut around it: on a mask holed by un-OCR'd Japanese, or one whose
+    balloon sits off to one side of its box, the rect centre picks a run in
+    the wrong part of the region and the block is then flowed and anchored
+    there (1ja block 13, 2.95 em of anchor error against
+    ``demo/typeset_metrics``, 0.05 em on the optical column).  Runs are
     used, rather than the row's overall extent, so a concave bubble (one with
     a tail, or two bubbles joined) never lets a line cross empty space.
 
@@ -273,7 +289,11 @@ def mask_spans(mask: np.ndarray, rect: Rect, cx: Optional[float] = None) -> np.n
     spans = np.zeros((h, 2), dtype=np.float64)
     if h == 0 or w == 0:
         return spans
-    centre = (rect.w / 2.0) if cx is None else (cx - rect.x)
+    if cx is not None:
+        centre = cx - rect.x
+    else:
+        optical = interior_centre(mask)
+        centre = rect.w / 2.0 if optical is None else optical[0]
     padded = np.zeros((h, w + 2), dtype=bool)
     padded[:, 1:-1] = mask.astype(bool, copy=False)
     edges = padded[:, 1:] != padded[:, :-1]  # (h, w + 1): run starts and ends
@@ -557,29 +577,6 @@ def _rebalance(lines: List[str], budgets: Sequence[float], size: float, measure:
     return [" ".join(tokens[starts[i] : starts[i + 1]]) for i in range(n)]
 
 
-def _place(
-    flow: _Flower,
-    line_h: float,
-    glyph_h: float,
-    ink: Tuple[float, float],
-    sp: _Spans,
-    n: int,
-    block_top: float,
-    *,
-    hyphenate: bool,
-    allow_force: bool = False,
-) -> Optional[Typeset]:
-    """Try to flow the words into ``n`` lines starting at ``block_top``,
-    then balance the lines (:func:`_rebalance`).  ``ink`` is the ``(top,
-    bottom)`` offset of the inked rows within each line box."""
-    line_tops = block_top + np.arange(n, dtype=np.float64) * line_h
-    widths, centres = sp.budgets(line_tops + ink[0], line_tops + ink[1])
-    flowed = flow(widths.tolist(), hyphenate, allow_force)
-    if flowed is None:
-        return None
-    return _finish(flow, line_h, glyph_h, widths, centres, block_top, flowed)
-
-
 def _finish(
     flow: _Flower,
     line_h: float,
@@ -588,21 +585,20 @@ def _finish(
     centres: np.ndarray,
     block_top: float,
     flowed: Tuple[List[str], int, int],
+    anchor_x: Optional[float] = None,
 ) -> Typeset:
-    """Balance the flowed lines over their budgets and position them."""
+    """Balance the flowed lines over their budgets and position them: each
+    line is centred on ``anchor_x`` as far as its own budget lets it reach
+    (:func:`.anchor.line_centre`), and on the budget's centre when the block
+    has no horizontal anchor."""
     lines, hyphens, forced = flowed
     lines = _rebalance(lines, widths.tolist(), flow.size, flow.measure)
-    placed = [
-        PlacedLine(line, float(centres[i]), block_top + i * line_h, flow.measure(line, flow.size)[0])
-        for i, line in enumerate(lines)
-    ]
+    placed: List[PlacedLine] = []
+    for i, line in enumerate(lines):
+        width = flow.measure(line, flow.size)[0]
+        cx = line_centre(float(centres[i]), float(widths[i]), width, anchor_x)
+        placed.append(PlacedLine(line, cx, block_top + i * line_h, width))
     return Typeset(flow.size, line_h, placed, True, hyphens + forced, glyph_h)
-
-
-def _aspect(ts: Typeset) -> float:
-    widest = max((l.width for l in ts.lines), default=0.0)
-    height = ts.line_h * max(1, len(ts.lines))
-    return widest / height if height > 0 else 0.0
 
 
 def typeset(
@@ -621,12 +617,17 @@ def typeset(
     first row is at absolute y ``top``), choosing the largest font size not
     above ``max_size`` at which every word fits, then balancing line lengths.
 
-    The inked block is centred vertically on ``anchor_y`` (default: the
-    region's centre), sliding away from it only as far as needed to find
-    rows with room.  For each candidate size the smallest line count that
-    holds the text is found first; when that block is wider than
-    ``_MAX_ASPECT`` times its height, more lines are added while they still
-    fit, so a wide bubble gets an oval rather than a banner.  At a given size
+    The inked block is centred on ``anchor_y`` (default: the region's
+    *optical* centre, the middle of the largest circle inscribed in it -
+    :func:`.anchor.spans_centre` - which a tail or a flat side cannot drag
+    off the balloon the way it drags the middle of the rows' bounding box),
+    sliding away from it only as far as needed to find rows with room; when
+    the anchor is the default the lines are centred on its x as well, as far
+    as each line's own budget lets it reach.  For each candidate size the
+    smallest line count that holds the text *and* lands on the anchor is
+    found first; when that block is wider than ``anchor._MAX_ASPECT`` times
+    its height, the measure is narrowed until it takes another line, so a
+    wide bubble gets an oval rather than a banner.  At a given size
     a layout without hyphens (dictionary syllable breaks, at most one per
     word) beats one with them, even if it needs more lines; and a layout
     with hyphens at one size is only kept when no size a little smaller sets
@@ -649,7 +650,16 @@ def typeset(
         return _fallback(words, spans, top, measure, min_size, line_gap)
     region_top = top + float(filled[0])
     region_bottom = top + float(filled[-1]) + 1.0
-    centre_y = (region_top + region_bottom) / 2.0 if anchor_y is None else float(anchor_y)
+    # Aim at the region's optical centre, computed once per block; a caller
+    # that passes ``anchor_y`` keeps its own aim and its own horizontal
+    # placement (free text belongs over the Japanese it replaces, not over
+    # the middle of the shape it was given).
+    optical = spans_centre(spans, top) if anchor_y is None else None
+    anchor_x = None if optical is None else optical[0]
+    if anchor_y is not None:
+        centre_y = float(anchor_y)
+    else:
+        centre_y = optical[1] if optical is not None else (region_top + region_bottom) / 2.0
     centre_y = min(max(centre_y, region_top), region_bottom)
     widest_span = float(np.max(spans[:, 1] - spans[:, 0]))
     sp = _Spans(spans, top)
@@ -660,14 +670,15 @@ def typeset(
     best_score = float("inf")
     while True:
         allow_force = size <= _FORCE_SPLIT_SCALE * max_size + 1e-6 or size <= min_size + 1e-6
-        result = _typeset_at(words, text, size, measure, sp, region_top, region_bottom, centre_y, widest_span,
-                             line_gap, lang, allow_force)
+        result = _typeset_at(words, text, size, measure, sp, region_top, region_bottom, centre_y, anchor_x,
+                             widest_span, line_gap, lang, allow_force)
         if result is not None:
-            score = (1.0 - size / size0) + _HYPHEN_SIZE_COST * result.hyphens
+            off = _off_centre_em(result, centre_y)
+            score = (1.0 - size / size0) + _HYPHEN_SIZE_COST * result.hyphens + _OFF_CENTRE_SIZE_COST * off
             if score < best_score:
                 best, best_score = result, score
-            if result.hyphens == 0:
-                break  # a hyphen-free layout: no smaller size can score better
+            if result.hyphens == 0 and off <= 0.0:
+                break  # hyphen-free and centred: no smaller size can score better
         if size <= min_size:
             break
         next_size = max(size * _SIZE_STEP, min_size)
@@ -679,6 +690,17 @@ def typeset(
     return _fallback(words, spans, top, measure, min_size, line_gap)
 
 
+def _off_centre_em(ts: Typeset, anchor_y: float) -> float:
+    """How far ``ts`` inks from ``anchor_y``, in ems of its own size, past
+    the ``ANCHOR_SLACK_EM`` a centred block is allowed; 0 when it is centred.
+    The size loop pays ``_OFF_CENTRE_SIZE_COST`` of the size per em of it."""
+    if not ts.lines or ts.size <= 0:
+        return 0.0
+    glyph_h = ts.glyph_h if ts.glyph_h > 0 else ts.line_h
+    centre = ink_centre(ts, ink_offsets(ts.text, glyph_h))
+    return max(0.0, abs(centre - anchor_y) / ts.size - ANCHOR_SLACK_EM)
+
+
 def _typeset_at(
     words: Sequence[str],
     text: str,
@@ -688,73 +710,38 @@ def _typeset_at(
     region_top: float,
     region_bottom: float,
     centre_y: float,
+    anchor_x: Optional[float],
     widest_span: float,
     line_gap: float,
     lang: str,
     allow_force: bool,
 ) -> Optional[Typeset]:
     """The best layout of ``words`` at exactly ``size`` (see :func:`typeset`):
-    hyphen-free first, then hyphenated; the fewest lines that fit, made
-    taller while the block is banner-shaped.  None when nothing fits."""
+    hyphen-free first, then hyphenated; the fewest lines that flow and land
+    on the anchor, then widened while the block is banner-shaped.  The
+    vertical search lives in :class:`.anchor.Placement`.  None when nothing
+    fits."""
     glyph_h = measure("Mg", size)[1]
     line_h = line_pitch(text, glyph_h, line_gap)
     ink = ink_offsets(text, glyph_h)
-    ink_h1 = ink[1] - ink[0]  # inked height of a single line
     span_h = region_bottom - region_top
+    ink_h1 = ink[1] - ink[0]  # inked height of a single line
     max_lines = int((span_h - ink_h1) // line_h) + 1 if span_h >= ink_h1 else 0
     flow = _Flower(words, size, measure, lang)
-    step = line_h / 4.0
+
+    def finish(widths: np.ndarray, centres: np.ndarray, block_top: float,
+               flowed: Tuple[List[str], int, int]) -> Typeset:
+        return _finish(flow, line_h, glyph_h, widths, centres, block_top, flowed, anchor_x)
+
+    slack = ANCHOR_SLACK_EM * size
+    search = Placement(flow, sp.budgets, finish, line_h=line_h, ink=ink,
+                       region=(region_top, region_bottom), anchor_y=centre_y,
+                       slack=slack, width_quantum=_WIDTH_QUANTUM)
     for hyphenate in (False, True):
-        for n in range(1, max_lines + 1):
-            if not hyphenate and n * widest_span < flow.total_w * 0.999:
-                continue  # cannot hold the text even wall-to-wall
-            block_h = (n - 1) * line_h + ink_h1  # inked height of the block
-            # Candidate vertical placements: inked block centred on the
-            # anchor, then nudged up/down in quarter-line steps; every
-            # offset's line budgets come from one vectorised range query.
-            lo, hi = region_top - ink[0], region_bottom - ink[0] - block_h
-            base = min(max(centre_y - block_h / 2.0 - ink[0], lo), hi)
-            k = np.arange(1, int((hi - lo) / step) + 2, dtype=np.float64)
-            k = k[k * step <= (hi - lo)]
-            offsets = np.concatenate(([0.0], np.stack((k * step, -k * step), axis=1).ravel()))
-            block_tops = base + offsets
-            inside = (block_tops >= lo - 1e-6) & (block_tops <= hi + 1e-6)
-            block_tops = block_tops[inside]
-            if block_tops.size == 0:
-                continue
-            line_tops = block_tops[:, None] + np.arange(n, dtype=np.float64)[None, :] * line_h
-            widths, centres = sp.budgets(line_tops + ink[0], line_tops + ink[1])
-            # Widths floored to the quantum: offsets sharing a tuple share one
-            # flow, and without hyphens lines that cannot hold the text even
-            # wall-to-wall are skipped before any lookup.
-            quantised = np.floor(widths / _WIDTH_QUANTUM) * _WIDTH_QUANTUM
-            if hyphenate:
-                candidates = range(block_tops.size)
-            else:
-                candidates = np.flatnonzero(quantised.sum(axis=1) >= flow.total_w * 0.999)
-            found: Optional[Typeset] = None
-            for o in candidates:
-                flowed = flow.quantised(tuple(quantised[o].tolist()), hyphenate, allow_force)
-                if flowed is not None:
-                    found = _finish(flow, line_h, glyph_h, widths[o], centres[o], float(block_tops[o]), flowed)
-                    break
-            if found is None:
-                continue
-            result = found
-            # Prefer an oval to a banner: add lines while too wide.
-            extra = n
-            while _aspect(result) > _MAX_ASPECT and extra < max_lines:
-                extra += 1
-                block_h = (extra - 1) * line_h + ink_h1
-                lo2, hi2 = region_top - ink[0], region_bottom - ink[0] - block_h
-                if hi2 < lo2:
-                    break
-                base2 = min(max(centre_y - block_h / 2.0 - ink[0], lo2), hi2)
-                taller = _place(flow, line_h, glyph_h, ink, sp, extra, base2, hyphenate=hyphenate, allow_force=allow_force)
-                if taller is None or taller.hyphens > result.hyphens:
-                    break
-                result = taller
-            return result
+        found = search.search(max_lines, widest_span, slack,
+                              hyphenate=hyphenate, allow_force=allow_force)
+        if found is not None:
+            return found
     return None
 
 
