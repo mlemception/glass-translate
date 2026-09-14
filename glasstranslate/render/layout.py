@@ -11,9 +11,11 @@ Turns raw OCR lines into *text blocks* ready for translation and rendering:
    top-to-bottom, so the block text is the whole utterance in order, which
    translates far better than one column at a time.
 3. **Bubble detection** - the paper around the block is flood-filled (with the
-   text itself painted over) to find the speech bubble.  When the enclosing
-   region is bubble-sized the translation is typeset inside its outline;
-   otherwise the text is treated as free text over artwork.
+   text itself painted over) to find the speech bubble.  Joined balloons, and
+   balloons whose outline opens into the page, share one patch of paper;
+   :mod:`.bubbles` cuts it into one interior per block first.  When the
+   block's own interior is bubble-sized the translation is typeset inside its
+   outline; otherwise the text is treated as free text over artwork.
 4. **Sizing** - the translation's font size ceiling is the source
    characters' em (their pitch along the column), shared by every dialogue
    block on the page so all speech is lettered at one size.
@@ -42,12 +44,20 @@ import cv2
 import numpy as np
 
 from ..core.types import RGB, Rect, Segment, SegmentStyle
+from . import bubbles
 from .style import extract_colors, is_vertical, quad_angle_deg, quad_text_height, quad_text_width
 
 # --- tunables --------------------------------------------------------------
 _LIGHT_THRESHOLD = 200  # grey level above which a pixel is "paper" (light backgrounds)
 _DARK_THRESHOLD = 60  # grey level below which a pixel is "paper" (dark backgrounds)
 _FURIGANA_MAX_RATIO = 0.7  # glyph size relative to the neighbouring main text
+# The same limit on the character em, which is the sharp test.  An OCR box
+# runs about 1.4 ems across, so a dialogue column standing beside a slightly
+# bigger one clears the glyph ratio easily; ruby, printed at half the pitch of
+# the kanji it reads, does not come near it.  Over the five reference pages
+# real ruby reaches 0.71 of its parent's em and the dialogue columns the glyph
+# rule alone ate (``すまんな``, ``ところで``, ``これだ``...) start at 0.85.
+_FURIGANA_MAX_EM_RATIO = 0.78
 _FURIGANA_REACH = 1.4  # how far (in main glyph sizes) furigana may sit from its text
 _GROUP_REACH = 0.7  # gap (in glyph sizes) that still joins two lines into a block
 _GROUP_SIZE_RATIO = 1.7  # max glyph-size ratio between the lines of one block
@@ -56,7 +66,31 @@ _BUBBLE_MAX_AREA_RATIO = 12.0  # paper area / block area beyond which it is not 
 # this factor plus a two-glyph margin.  Larger paper regions are the panel
 # background, and the text on them is free text laid out where it was.
 _BUBBLE_MAX_DIM_RATIO = 2.5
+# ...but only along the reading direction, where the OCR measures the text.
+# Across it the OCR reports a lower bound, because whole columns go missing
+# (1ja yields 25 raw lines for the whole page, and four of the five columns
+# in one balloon are simply absent), so across the reading direction a
+# balloon may also be this many columns wide whatever the OCR found.  The
+# columns of a balloon are set at the character pitch, so one column is one
+# em across - not one ``glyph_size``, which is the OCR box and runs 1.4 em.
+_BUBBLE_MAX_COLUMNS = 5.0
 _BUBBLE_MIN_SOLIDITY = 0.75  # paper area / convex hull area: bubbles are convex-ish
+# A balloon is walled in by its own outline and leaks into the paper behind it
+# through a tail or a gap at most; at least this much of its edge has to be
+# that wall (ink, artwork, or the balloon next door), the rest being paper the
+# cut in :mod:`.bubbles` left to nobody.  Without it a room cut out of the
+# paper a panel is drawn on - the white between a scaffold's beams, a slice of
+# a flat panel - reads as a balloon on every other gate, and the eraser then
+# paints flat paper over the artwork inside it.  Measured on the reference
+# pages: real balloons 0.69 - 1.00, rooms cut out of panel paper 0.03 - 0.48.
+_BUBBLE_MIN_WALLED = 0.5
+# Blocks are searched together when one's text reaches into another's window,
+# because only then can they share a room.  That relation is transitive, and
+# on a screen whose paper is all one component a chain of blocks can drag the
+# whole frame into one cluster; a cluster spreading over more than this many
+# times its biggest member's own window is not a room, and its blocks are
+# searched one at a time instead (see :func:`_spread`).
+_CLUSTER_MAX_SPREAD = 4.0
 # Inset of the layout region from the bubble outline, in ems of the block's
 # source text (the lettering's size ceiling): the lettering keeps this much
 # air from the outline on every side (reference pages: ~0.25 em from ink to
@@ -130,6 +164,14 @@ def is_kana_only(text: str) -> bool:
     """True when every letter of ``text`` is hiragana/katakana (furigana)."""
     letters = [c for c in text if not c.isspace() and c not in "。、！？…・「」"]
     return bool(letters) and all(_is_kana(c) for c in letters)
+
+
+def has_kanji(text: str) -> bool:
+    """True when ``text`` carries a CJK ideograph.  Furigana is the reading of
+    kanji, so a line of pure kana never carries ruby of its own - which is what
+    keeps a small kana column standing beside a bigger kana one (2ja
+    ``ねえ``/``って``, 3jp ``こねーよ``/``いちいち``) out of the ruby rule."""
+    return any(0x3400 <= ord(c) <= 0x4DBF or 0x4E00 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF for c in text)
 
 
 def has_cjk(text: str) -> bool:
@@ -243,14 +285,22 @@ class _PaperMaps:
 
 # ------------------------------------------------------------ grouping
 def _mark_furigana(lines: List[_Line]) -> None:
+    """Point every ruby line at the line it reads.  Ruby is kana-only, it
+    annotates kanji (:func:`has_kanji`), it is printed much smaller than that
+    kanji - on the glyph box *and* on the character em, the one the OCR does
+    not inflate - and it sits on the same paper within ``_FURIGANA_REACH``.
+    A line with a parent is dropped from the translation but still erased, so
+    the size rules are kept tight: what they wave through is lost speech."""
     for i, s in enumerate(lines):
         if not s.kana:
             continue
         best: Optional[Tuple[float, int]] = None
         for j, m in enumerate(lines):
-            if j == i or m.kana and m.glyph <= s.glyph:
+            if j == i or not has_kanji(m.seg.text):
                 continue
             if s.glyph >= _FURIGANA_MAX_RATIO * m.glyph or s.comp != m.comp:
+                continue
+            if s.em >= _FURIGANA_MAX_EM_RATIO * m.em:
                 continue
             reach = _FURIGANA_REACH * m.glyph
             near = Rect(m.bbox.x - int(reach), m.bbox.y - int(reach), m.bbox.w + 2 * int(reach), m.bbox.h + 2 * int(reach))
@@ -265,15 +315,30 @@ def _mark_furigana(lines: List[_Line]) -> None:
             s.furigana_of = best[1]
 
 
+def _outsized(one: float, other: float) -> bool:
+    """Do these two measurements differ by more than ``_GROUP_SIZE_RATIO``?"""
+    big, small = max(one, other), min(one, other)
+    return big > _GROUP_SIZE_RATIO * max(small, 1e-6)
+
+
 def _compatible(a: _Line, b: _Line) -> bool:
     if a.comp != b.comp:
         return False
     if a.vertical is not None and b.vertical is not None and a.vertical != b.vertical:
         return False
-    big, small = max(a.glyph, b.glyph), min(a.glyph, b.glyph)
-    if big > _GROUP_SIZE_RATIO * small:
+    # Two lines are different sizes only when *both* ways of measuring them
+    # say so.  The OCR box is inflated sideways over a neighbouring column
+    # and carries padding that varies with the glyphs in it; the character em
+    # is the pitch along the line (:func:`glyph_em`) and is coarse on a line
+    # of one or two characters, where a single cell sets it.  Each measure
+    # splits an utterance the other keeps: 3jp's `迷っても` / `なくても` are one
+    # sentence whose boxes run 46.0 and 25.0 (ratio 1.84, over the limit) but
+    # whose ems run 22.0 and 18.8 (1.17); 2ja's `って` sits in the middle of
+    # `ねえ...有名なの？` with a box that matches its neighbours' and an em of
+    # 36.5 against their 16.6.  Splitting only when both agree keeps both.
+    if _outsized(a.em, b.em) and _outsized(a.glyph, b.glyph):
         return False
-    reach = _GROUP_REACH * big
+    reach = _GROUP_REACH * max(a.glyph, b.glyph)
     grown = Rect(a.bbox.x - int(reach), a.bbox.y - int(reach), a.bbox.w + 2 * int(reach), a.bbox.h + 2 * int(reach))
     return grown.intersects(b.bbox)
 
@@ -312,32 +377,29 @@ def _ordered_text(members: List[_Line], vertical: bool) -> str:
 
 
 # ------------------------------------------------------------ blocks
-def _solidity(region: np.ndarray, area: int) -> float:
-    """Area of the paper component over the area of its convex hull."""
-    contours, _ = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return 0.0
-    hull = cv2.convexHull(np.concatenate(contours))
-    hull_area = float(cv2.contourArea(hull))
-    return area / hull_area if hull_area > 0 else 0.0
+@dataclass
+class _Spec:
+    """What the paper pass needs to know about a group of lines before the
+    block itself is made: who is in it, how big and which way its characters
+    run, where it sits and whether its paper is dark."""
+
+    members: List[_Line]
+    furigana: List[_Line]
+    vertical: bool
+    glyph: float
+    em: float
+    source_rect: Rect
+    fg: RGB
+    bg: RGB
+    angle: float
+    dark: bool
 
 
-def _make_block(
-    img: np.ndarray,
-    lines: List[_Line],
-    member_idx: List[int],
-    furigana_idx: List[int],
-    maps: _PaperMaps,
-) -> TextBlock:
-    height, width = img.shape[:2]
+def _spec(lines: List[_Line], member_idx: List[int], furigana_idx: List[int]) -> _Spec:
     members = [lines[i] for i in member_idx]
     furigana = [lines[i] for i in furigana_idx]
     votes = [l.vertical for l in members if l.vertical is not None]
     vertical = bool(votes) and sum(votes) * 2 >= len(votes)
-    glyph = float(np.median([l.glyph for l in members]))
-    text = _ordered_text(members, vertical)
-    source_rect = _union([l.bbox for l in members + furigana])
-    quad = _rect_quad(source_rect)
     # The block's colours are the medians of its lines' (measured once in
     # build_blocks); re-clustering the union quad gave the same answer for
     # single-colour blocks at 0.6 ms a block.
@@ -345,112 +407,319 @@ def _make_block(
     bg = tuple(int(v) for v in np.median([l.bg for l in members], axis=0))
     if _luma(fg) < _FG_SNAP_LUMA:
         fg = (0, 0, 0)
-    dark = _luma(bg) < 128.0
     angle = 0.0
     if not vertical:
         angles = [quad_angle_deg(l.seg.quad) for l in members if l.vertical is not None]
         median = float(np.median(angles)) if angles else 0.0
         angle = median if abs(median) > 4.0 else 0.0
+    return _Spec(
+        members=members,
+        furigana=furigana,
+        vertical=vertical,
+        glyph=float(np.median([l.glyph for l in members])),
+        em=float(np.median([l.em for l in members])),
+        source_rect=_union([l.bbox for l in members + furigana]),
+        fg=fg,
+        bg=bg,
+        angle=angle,
+        dark=_luma(bg) < 128.0,
+    )
 
-    labels, stats = maps.get(dark)
-    comp = maps.label_at(dark, members[0].bbox)
+
+def _component(maps: _PaperMaps, spec: _Spec) -> Tuple[int, Rect, int]:
+    """The paper component under the spec's first line, as ``(label, bounding
+    box, area)``.  Label 0 means the component is just the text boxes painted
+    into the paper map (a backdrop whose grey is neither light nor dark
+    paper): there is no paper around the text, so the block is neither in a
+    bubble nor bounded."""
+    _, stats = maps.get(spec.dark)
+    comp = maps.label_at(spec.dark, spec.members[0].bbox)
     cx, cy, cw, ch, carea = (int(v) for v in stats[comp][:5])
-    comp_rect = Rect(cx, cy, cw, ch)
-    if comp > 0 and cw <= source_rect.w + 2 * _TEXT_PAD + 2 and ch <= source_rect.h + 2 * _TEXT_PAD + 2:
-        # The component is just the text boxes painted into the paper map
-        # (a backdrop whose grey is neither light nor dark paper): there is
-        # no paper around the text, so it is neither a bubble nor bounded.
+    src = spec.source_rect
+    if comp > 0 and cw <= src.w + 2 * _TEXT_PAD + 2 and ch <= src.h + 2 * _TEXT_PAD + 2:
         comp = 0
-    region = (labels[cy : cy + ch, cx : cx + cw] == comp).astype(np.uint8) if comp > 0 else None
-    contains = comp_rect.x <= source_rect.x + 2 and comp_rect.y <= source_rect.y + 2 and (
-        comp_rect.x2 >= source_rect.x2 - 2 and comp_rect.y2 >= source_rect.y2 - 2
-    )
-    is_bubble = (
-        comp > 0
-        and contains
-        and carea <= _BUBBLE_MAX_AREA_RATIO * max(1, source_rect.w * source_rect.h)
-        and cw <= _BUBBLE_MAX_DIM_RATIO * source_rect.w + 2 * glyph
-        and ch <= _BUBBLE_MAX_DIM_RATIO * source_rect.h + 2 * glyph
-        and _solidity(region, carea) >= _BUBBLE_MIN_SOLIDITY
+    return comp, Rect(cx, cy, cw, ch), carea
+
+
+def _whole(maps: _PaperMaps, spec: _Spec, comp: int, rect: Rect, area: int) -> bubbles.Interior:
+    """A paper component taken as one interior, uncut."""
+    labels, _ = maps.get(spec.dark)
+    return bubbles.Interior(rect, labels[rect.y : rect.y2, rect.x : rect.x2] == comp, area)
+
+
+def _search_window(spec: _Spec, comp_rect: Rect, width: int, height: int) -> Rect:
+    """The paper worth searching for this block's balloon: the source
+    footprint grown by as far as a balloon may reach past it on each side
+    (:func:`_dim_limits`) with a glyph of slack, clipped to the component.
+    Paper beyond it cannot be part of anything the gate would accept, and
+    cutting the search down to it keeps a page-sized background component
+    from costing a page-sized distance transform per block."""
+    src, glyph = spec.source_rect, spec.glyph
+    max_w, max_h = _dim_limits(spec)
+    grown = _grow(src, max_w - src.w + glyph, max_h - src.h + glyph, width, height)
+    x, y = max(grown.x, comp_rect.x), max(grown.y, comp_rect.y)
+    return Rect(x, y, min(grown.x2, comp_rect.x2) - x, min(grown.y2, comp_rect.y2) - y)
+
+
+def _clusters(idx: Sequence[int], specs: Sequence[_Spec], windows: Dict[int, Rect]) -> List[List[int]]:
+    """Blocks that have to be looked at together, because only they can turn
+    out to share a room: a shared room is one block's whole interior, so it
+    lies in that block's search window and holds the other's text, which
+    therefore reaches into that window too."""
+    parent = {i: i for i in idx}
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for pos, a in enumerate(idx):
+        for b in idx[pos + 1 :]:
+            ra, rb = find(a), find(b)
+            near = windows[a].intersects(specs[b].source_rect) or windows[b].intersects(specs[a].source_rect)
+            if ra != rb and near:
+                parent[rb] = ra
+    out: Dict[int, List[int]] = {}
+    for i in idx:
+        out.setdefault(find(i), []).append(i)
+    return list(out.values())
+
+
+def _spread(groups: Sequence[Sequence[int]], windows: Dict[int, Rect]) -> List[List[int]]:
+    """Break up a cluster whose blocks are too far apart to be in one room.
+
+    :func:`_clusters` merges transitively, so on a screen whose paper is one
+    connected component - a document viewer, a white page behind a manga
+    page - a chain of blocks reaching one after another can put the whole
+    frame in a single cluster.  The union of their windows is then the whole
+    frame, and :mod:`.bubbles` pays a distance transform per block over it:
+    24 blocks on a 4K frame measured 1.7 s, against a 100 ms pipeline tick.
+
+    A cluster that spreads over more than ``_CLUSTER_MAX_SPREAD`` times its
+    biggest member's own search window is not one room by any reading, so
+    every block in it is searched alone.  Blocks that then turn out to claim
+    the same paper are dropped to free text by :func:`_uncross`, which is
+    what keeps the interiors disjoint when the clustering is skipped."""
+    out: List[List[int]] = []
+    for group in groups:
+        union = _union([windows[i] for i in group])
+        largest = max(windows[i].w * windows[i].h for i in group)
+        if len(group) > 1 and union.w * union.h > _CLUSTER_MAX_SPREAD * largest:
+            out.extend([i] for i in group)
+        else:
+            out.append(list(group))
+    return out
+
+
+def _uncross(out: List[Optional[bubbles.Interior]]) -> None:
+    """Interiors are disjoint by construction inside one cluster, and two
+    blocks in different clusters are too far apart to meet.  When
+    :func:`_spread` has taken a cluster apart that guarantee is gone, so any
+    pair that does overlap gives up: the smaller one is no balloon."""
+    live = [i for i, interior in enumerate(out) if interior is not None]
+    for pos, i in enumerate(live):
+        for j in live[pos + 1 :]:
+            a, b = out[i], out[j]
+            if a is None or b is None or not a.rect.intersects(b.rect):
+                continue
+            if _touching(a, b):
+                loser = i if a.area <= b.area else j
+                out[loser] = None
+
+
+def _touching(a: bubbles.Interior, b: bubbles.Interior) -> bool:
+    """Do two interiors share a pixel?"""
+    x0, y0 = max(a.rect.x, b.rect.x), max(a.rect.y, b.rect.y)
+    x1, y1 = min(a.rect.x2, b.rect.x2), min(a.rect.y2, b.rect.y2)
+    left = a.region[y0 - a.rect.y : y1 - a.rect.y, x0 - a.rect.x : x1 - a.rect.x]
+    right = b.region[y0 - b.rect.y : y1 - b.rect.y, x0 - b.rect.x : x1 - b.rect.x]
+    return bool((left & right).any())
+
+
+def _escapes(interior: bubbles.Interior, window: Rect, comp_rect: Rect) -> bool:
+    """The interior runs into an edge of the search window that is not an
+    edge of the component itself: the paper goes on past what the gate would
+    allow, so this is no balloon."""
+    r = interior.rect
+    return (
+        (r.x <= window.x and window.x > comp_rect.x)
+        or (r.y <= window.y and window.y > comp_rect.y)
+        or (r.x2 >= window.x2 and window.x2 < comp_rect.x2)
+        or (r.y2 >= window.y2 and window.y2 < comp_rect.y2)
     )
 
+
+def _interiors(maps: _PaperMaps, specs: Sequence[_Spec], width: int, height: int) -> List[Optional[bubbles.Interior]]:
+    """One balloon interior per spec.  A component holding a single block that
+    already reads as a balloon is taken as it is - that is most of the
+    balloons on a page, and it costs nothing.  Every other one (joined
+    balloons, a balloon that leaks into the page, the page itself) goes to
+    :mod:`.bubbles` a search window at a time, to be cut into one room per
+    block."""
+    out: List[Optional[bubbles.Interior]] = [None] * len(specs)
+    paper: Dict[Tuple[bool, int], Tuple[Rect, int, List[int]]] = {}
+    for i, spec in enumerate(specs):
+        comp, rect, area = _component(maps, spec)
+        if comp > 0:
+            paper.setdefault((spec.dark, comp), (rect, area, []))[2].append(i)
+    for (_, comp), (rect, area, idx) in paper.items():
+        if len(idx) == 1:
+            whole = _whole(maps, specs[idx[0]], comp, rect, area)
+            if _is_bubble(whole, specs[idx[0]]):
+                out[idx[0]] = whole
+                continue
+        labels, _ = maps.get(specs[idx[0]].dark)
+        windows = {i: _search_window(specs[i], rect, width, height) for i in idx}
+        for group in _spread(_clusters(idx, specs, windows), windows):
+            window = _union([windows[i] for i in group])
+            region = (labels[window.y : window.y2, window.x : window.x2] == comp).view(np.uint8)
+            cut = bubbles.interiors(
+                region,
+                (window.x, window.y),
+                [specs[i].source_rect for i in group],
+                [specs[i].em for i in group],
+            )
+            for i, interior in zip(group, cut):
+                out[i] = None if interior is None or _escapes(interior, window, rect) else interior
+    _uncross(out)
+    return out
+
+
+def _dim_limits(spec: _Spec) -> Tuple[float, float]:
+    """How wide and how tall a patch of paper may be and still be the balloon
+    the spec's text sits in, in pixels.
+
+    A bubble hugs its text, and along the reading direction the OCR measures
+    that text: a column's length is the column's length.  Across it the OCR
+    reports a lower bound only, so the balloon may also be
+    ``_BUBBLE_MAX_COLUMNS`` columns wide there whatever the OCR found.  Both
+    limits carry a two-glyph margin for the outline and the air inside it."""
+    src, glyph = spec.source_rect, spec.glyph
+    along, across = (src.h, src.w) if spec.vertical else (src.w, src.h)
+    along_limit = _BUBBLE_MAX_DIM_RATIO * along + 2 * glyph
+    across_limit = max(_BUBBLE_MAX_DIM_RATIO * across, _BUBBLE_MAX_COLUMNS * spec.em) + 2 * glyph
+    return (across_limit, along_limit) if spec.vertical else (along_limit, across_limit)
+
+
+def _holds(rect: Rect, src: Rect) -> bool:
+    """Does ``rect`` cover the whole source footprint (two pixels of slack)?"""
+    return rect.x <= src.x + 2 and rect.y <= src.y + 2 and rect.x2 >= src.x2 - 2 and rect.y2 >= src.y2 - 2
+
+
+def _is_bubble(interior: Optional[bubbles.Interior], spec: _Spec) -> bool:
+    """Does this patch of paper read as the balloon the block's text sits in?
+    It has to hold the whole source footprint, stay within
+    ``_BUBBLE_MAX_AREA_RATIO`` of its area, hug it (:func:`_dim_limits`), be
+    walled in (``_BUBBLE_MIN_WALLED``) and be convex-ish
+    (``_BUBBLE_MIN_SOLIDITY``)."""
+    if interior is None or interior.area <= 0:
+        return False
+    src = spec.source_rect
+    max_w, max_h = _dim_limits(spec)
+    return (
+        _holds(interior.rect, src)
+        and interior.area <= _BUBBLE_MAX_AREA_RATIO * max(1, src.w * src.h)
+        and interior.rect.w <= max_w
+        and interior.rect.h <= max_h
+        and interior.walled >= _BUBBLE_MIN_WALLED
+        and interior.solidity() >= _BUBBLE_MIN_SOLIDITY
+    )
+
+
+def _bubble_region(interior: bubbles.Interior, spec: _Spec) -> Optional[np.ndarray]:
+    """The lettering area inside a balloon: the interior with its holes
+    closed, inset by ``_BUBBLE_MARGIN_EM`` ems and reduced to the one piece
+    the block's text is on - an inset pinches a waisted balloon in two, and
+    the lettering is anchored on the inscribed circle of whatever it is
+    handed.  None when the inset leaves nothing (a caption box barely roomier
+    than its text).
+
+    The holes the source glyphs punch in the region are *kept*, although the
+    eraser paints over them (``erase._analyse_bubble`` fills them itself) and
+    although they drop the region's inscribed circle into a gap between two
+    characters - 1ja block 13 measures 7.0 times its inscribed circle with
+    them and 1.2 without.  Closing them was tried and measured worse on every
+    score that compares us with the letterer (overflowing blocks 2 -> 9,
+    containment 0.022 -> 0.052, centre offset 0.71 -> 0.78 em), because the
+    ground truth derives its own interior from the same paper map and has the
+    same holes: filling ours alone only makes the two disagree."""
+    margin = max(3, int(round(_BUBBLE_MARGIN_EM * spec.em)))
+    inset = bubbles.inset(interior.region, margin)
+    if not inset.any():
+        return None
+    # The gaps the paper map leaves between a block's own OCR boxes are left
+    # alone too.  A hairline close (2 - 4 px) adds no pixel anywhere and moves
+    # no row's widest run; reaching 3jp's merged balloon takes ~20 px, which
+    # is the hole filling above.  Painting the block's own footprint in does
+    # reach it (widest run 50 -> 97 px, type 9.0 -> 10.4 px) but fattens every
+    # mask towards its text: 0.36 -> 0.44 em of mean centre offset, for one
+    # block.
+    return bubbles.one_piece(inset, spec.source_rect, (interior.rect.x, interior.rect.y))
+
+
+def _open_layout(spec: _Spec, maps: _PaperMaps, width: int, height: int) -> Tuple[Rect, Optional[np.ndarray], Rect]:
+    """Free text: ``(layout_box, layout_mask, layout_seed)``.  The seed is
+    where the text was, the box how far it may reach without placement data
+    (see the module docstring, step 6), and the mask - when the text is on
+    paper bounded by an outline, a face or a panel edge - which part of the
+    box is that paper."""
+    src, glyph = spec.source_rect, spec.glyph
+    seed = _grow(src, _OPEN_SEED_X * glyph, _OPEN_SEED_Y * glyph, width, height)
+    limit_x = max(_OPEN_LIMIT_X * src.w, _OPEN_LIMIT_MIN_X * glyph)
+    box = _grow(src, limit_x, _OPEN_LIMIT_Y * glyph, width, height)
+    comp, rect, _ = _component(maps, spec)
+    if comp <= 0 or not _holds(rect, src):
+        return box, None, seed
+    labels, _ = maps.get(spec.dark)
+    mask = labels[box.y : box.y2, box.x : box.x2] == comp
+    # The text itself was painted into the paper map; make sure the seed is
+    # entirely usable even if the map missed a glyph.
+    sy, sx = seed.y - box.y, seed.x - box.x
+    mask[sy : sy + seed.h, sx : sx + seed.w] = True
+    return box, mask, seed
+
+
+def _make_block(
+    img: np.ndarray, spec: _Spec, interior: Optional[bubbles.Interior], maps: _PaperMaps
+) -> TextBlock:
+    height, width = img.shape[:2]
     layout_box: Rect
     layout_mask: Optional[np.ndarray] = None
     layout_seed: Optional[Rect] = None
     bubble: Optional[Rect] = None
-    em = float(np.median([l.em for l in members]))
-    if is_bubble:
-        margin = max(3, int(round(_BUBBLE_MARGIN_EM * em)))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1))
-        # An explicit zero border: the component always touches its own
-        # bounding box, and OpenCV's default border would leave those edges
-        # (a caption box's outer sides) un-eroded, centring the text off.
-        eroded = cv2.erode(region, kernel, borderValue=0).astype(bool)
-        if eroded.any():
-            layout_box = comp_rect
-            layout_mask = eroded
-            bubble = comp_rect
-        else:
-            is_bubble = False
-    if not is_bubble:
-        # Free text: the seed is where it was, the box how far it may reach
-        # without placement data (see the module docstring, step 6).
-        layout_seed = _grow(source_rect, _OPEN_SEED_X * glyph, _OPEN_SEED_Y * glyph, width, height)
-        limit_x = max(_OPEN_LIMIT_X * source_rect.w, _OPEN_LIMIT_MIN_X * glyph)
-        layout_box = _grow(source_rect, limit_x, _OPEN_LIMIT_Y * glyph, width, height)
-        if comp > 0 and contains:
-            # On paper bounded by an outline (a face, a panel edge): the
-            # mask tells the placement which part of the box is that paper.
-            layout_mask = labels[layout_box.y : layout_box.y2, layout_box.x : layout_box.x2] == comp
-            # The text itself was painted into the paper map; make sure the
-            # seed is entirely usable even if the map missed a glyph.
-            sy, sx = layout_seed.y - layout_box.y, layout_seed.x - layout_box.x
-            layout_mask[sy : sy + layout_seed.h, sx : sx + layout_seed.w] = True
+    inset = _bubble_region(interior, spec) if _is_bubble(interior, spec) else None
+    if inset is not None and interior is not None:
+        layout_box = bubble = interior.rect
+        layout_mask = inset
+    else:
+        layout_box, layout_mask, layout_seed = _open_layout(spec, maps, width, height)
 
+    members = spec.members
     style = SegmentStyle(
-        fg=fg,
-        bg=bg,
-        angle_deg=angle,
-        text_height_px=glyph,
-        vertical=vertical,
+        fg=spec.fg,
+        bg=spec.bg,
+        angle_deg=spec.angle,
+        text_height_px=spec.glyph,
+        vertical=spec.vertical,
         layout_box=layout_box,
         layout_mask=layout_mask,
         upright=True,
-        max_font_px=_MAX_FONT_RATIO * em,
-        source_quads=np.stack([l.seg.quad for l in members]).astype(np.float32),
+        max_font_px=_MAX_FONT_RATIO * spec.em,
+        # Members *and* furigana: the footprint the placement reads off the
+        # style alone (``place._source_rect``) has to be the ink that was
+        # erased, which is what ``spec.source_rect`` already is.
+        source_quads=np.stack([l.seg.quad for l in members + spec.furigana]).astype(np.float32),
         layout_seed=layout_seed,
-        in_bubble=is_bubble,
+        in_bubble=bubble is not None,
     )
-    confidence = min(l.seg.confidence for l in members)
-    segment = Segment(text=text, quad=quad, confidence=confidence, lang_hint=members[0].seg.lang_hint)
-    return TextBlock(segment, style, [l.seg for l in members], [l.seg for l in furigana], bubble, em)
-
-
-def _split_shared_bubbles(blocks: List[TextBlock]) -> None:
-    """Two blocks in one paper component (joined bubbles) each keep the part
-    of the region nearer to their own text, so their layouts never overlap."""
-    by_bubble: Dict[Tuple[int, int, int, int], List[TextBlock]] = {}
-    for b in blocks:
-        if b.bubble is not None:
-            by_bubble.setdefault((b.bubble.x, b.bubble.y, b.bubble.w, b.bubble.h), []).append(b)
-    for group in by_bubble.values():
-        if len(group) < 2:
-            continue
-        box = group[0].bubble
-        assert box is not None
-        dists = []
-        for b in group:
-            src = b.segment.bbox
-            inv = np.full((box.h, box.w), 255, dtype=np.uint8)
-            x1, y1 = max(0, src.x - box.x), max(0, src.y - box.y)
-            x2, y2 = min(box.w, src.x2 - box.x), min(box.h, src.y2 - box.y)
-            if x2 > x1 and y2 > y1:
-                inv[y1:y2, x1:x2] = 0
-            dists.append(cv2.distanceTransform(inv, cv2.DIST_L2, 3))
-        owner = np.argmin(np.stack(dists), axis=0)
-        for i, b in enumerate(group):
-            assert b.style.layout_mask is not None
-            b.style.layout_mask = b.style.layout_mask & (owner == i)
+    segment = Segment(
+        text=_ordered_text(members, spec.vertical),
+        quad=_rect_quad(spec.source_rect),
+        confidence=min(l.seg.confidence for l in members),
+        lang_hint=members[0].seg.lang_hint,
+    )
+    return TextBlock(segment, style, [l.seg for l in members], [l.seg for l in spec.furigana], bubble, spec.em)
 
 
 def page_em(blocks: Sequence[TextBlock]) -> float:
@@ -512,11 +781,9 @@ def build_blocks(
     for i, l in enumerate(lines):
         if l.furigana_of is not None:
             furigana_by_main.setdefault(l.furigana_of, []).append(i)
-    blocks: List[TextBlock] = []
-    for members in groups:
-        furi = [f for m in members for f in furigana_by_main.get(m, [])]
-        blocks.append(_make_block(img_bgr, lines, members, furi, maps))
-    _split_shared_bubbles(blocks)
+    specs = [_spec(lines, members, [f for m in members for f in furigana_by_main.get(m, [])]) for members in groups]
+    interiors = _interiors(maps, specs, width, height)
+    blocks = [_make_block(img_bgr, spec, interior, maps) for spec, interior in zip(specs, interiors)]
     _uniform_font_sizes(blocks)
     t1 = time.perf_counter()
     erase.apply(img_bgr, blocks, all_segments if all_segments is not None else segments, gray=gray)
