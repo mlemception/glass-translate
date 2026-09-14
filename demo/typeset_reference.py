@@ -455,19 +455,64 @@ def block_interior(gray: np.ndarray, block: TextBlock) -> Optional[np.ndarray]:
     return paper_component(gray, boxes, block.members[0].bbox, block_window(block, gray.shape), _luma(st.bg) < 128.0)
 
 
+def _mask_bbox(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """``(x1, y1, x2, y2)`` of a mask's True pixels, or None when it is empty."""
+    rows, cols = np.any(mask, axis=1), np.any(mask, axis=0)
+    if not rows.any():
+        return None
+    ys, xs = np.flatnonzero(rows), np.flatnonzero(cols)
+    return int(xs[0]), int(ys[0]), int(xs[-1]) + 1, int(ys[-1]) + 1
+
+
+def _cotenant_groups(interiors: Sequence[Optional[np.ndarray]]) -> List[List[int]]:
+    """Block indices grouped by the balloon they share: two blocks are
+    co-tenants when their reference interiors overlap.
+
+    Overlap, not rect equality.  ``render/layout._split_shared_bubbles`` used
+    to give co-tenants an identical ``TextBlock.bubble``, so keying on that
+    rect worked; ``render/bubbles`` replaced it and every block now carries
+    its own rect, which no other block's ever equals.  Keying on the rect
+    after that change silently stopped detecting co-tenancy and scored a
+    block's half of a balloon against the whole balloon's centre.
+    """
+    idx = [i for i, m in enumerate(interiors) if m is not None and m.any()]
+    boxes = {i: _mask_bbox(interiors[i]) for i in idx}
+    parent = {i: i for i in idx}
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for pos, a in enumerate(idx):
+        for b in idx[pos + 1:]:
+            if find(a) == find(b) or not _boxes_touch(boxes[a], boxes[b]):
+                continue
+            if np.any(interiors[a] & interiors[b]):
+                parent[find(b)] = find(a)
+    groups: Dict[int, List[int]] = {}
+    for i in idx:
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def _boxes_touch(a: Optional[Tuple[int, int, int, int]], b: Optional[Tuple[int, int, int, int]]) -> bool:
+    """Cheap gate before the full mask intersection."""
+    if a is None or b is None:
+        return False
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
 def bubble_ownership(blocks: Sequence[TextBlock], interiors: Sequence[Optional[np.ndarray]]) -> List[Optional[np.ndarray]]:
     """Per block, the part of its bubble interior that is its own: the whole
     interior, or - for blocks sharing one bubble (joined bubbles, one
     utterance read as two blocks) - the pixels nearer to its source box than
-    to any co-tenant's (the rule of ``render/layout._split_shared_bubbles``).
-    None for free text."""
+    to any co-tenant's.  ``render/bubbles`` now cuts a joined component into
+    one interior per block up front, so co-tenancy is the exception and this
+    is a no-op on pages where the cut succeeded.  None for free text."""
     out: List[Optional[np.ndarray]] = [None] * len(blocks)
-    groups: Dict[Tuple[int, int, int, int], List[int]] = {}
-    for i, (b, inter) in enumerate(zip(blocks, interiors)):
-        if inter is None or b.bubble is None:
-            continue
-        groups.setdefault((b.bubble.x, b.bubble.y, b.bubble.w, b.bubble.h), []).append(i)
-    for idxs in groups.values():
+    for idxs in _cotenant_groups(interiors):
         if len(idxs) == 1:
             out[idxs[0]] = interiors[idxs[0]]
             continue
