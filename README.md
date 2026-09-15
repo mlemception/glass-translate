@@ -8,6 +8,10 @@ same layout. It's built mainly for reading Japanese manga in English: speech bub
 detected properly, so a whole bubble is translated as one sentence and lettered back into the
 bubble the way a real English edition would be.
 
+| Before | After |
+|:---:|:---:|
+| ![The original Japanese page](before.png) | ![The same page read, translated and lettered by GlassTranslate](after.png) |
+
 Everything happens on your own machine. No account, no sign-up, and nothing leaves your
 computer unless you deliberately turn on an online translator.
 
