@@ -468,25 +468,33 @@ def summary_table(tag: str, pages: Sequence[Dict[str, Any]]) -> str:
 
 
 # --------------------------------------------------------------- pages
-def load_ground_truth(stem: str) -> Optional[Dict[str, Any]]:
-    d = TD.reference_dir(stem)
+def load_ground_truth(stem: str, reference_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """``reference_root`` overrides ``demo/reference``: the corpus harness keeps its
+    thousands of derived pages under ``demo/output/corpus/`` instead."""
+    d = Path(reference_root) / stem if reference_root is not None else TD.reference_dir(stem)
     needed = [d / "erase_gt.png", d / "kept_art.png", d / "english_ink.png", d / TD.ALIGNED_REFERENCE_NAME, d / "blocks.json"]
     if not all(p.exists() for p in needed):
         return None
     masks = [cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) > 0 for p in needed[:3]]
     aligned = cv2.imread(str(needed[3]))
+    payload = json.loads(needed[4].read_text(encoding="utf-8"))
     return {
         "gt": TR.EraseGroundTruth(*masks),
         "eng_gray": cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY),
-        "records": json.loads(needed[4].read_text(encoding="utf-8"))["blocks"],
+        "records": payload["blocks"],
+        # English lines derive() could not give to any block.  The corpus harness needs
+        # them to decide whether the reference itself is too weak to score against.
+        "unassigned_english": payload.get("unassigned_english", []),
     }
 
 
-def score_page(image: Path, render_dir: Path, tag: str, *, device: str = "auto", min_confidence: float = 0.5) -> Optional[Dict[str, Any]]:
+def score_page(image: Path, render_dir: Path, tag: str, *, device: str = "auto", min_confidence: float = 0.5,
+               reference_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     stem = TD.page_stem(image)
-    truth = load_ground_truth(stem)
+    truth = load_ground_truth(stem, reference_root)
     if truth is None:
-        print(f"{stem}: no ground truth under {TD.reference_dir(stem)} (run demo/typeset_reference.py)", file=sys.stderr)
+        where = Path(reference_root) / stem if reference_root is not None else TD.reference_dir(stem)
+        print(f"{stem}: no ground truth under {where} (run demo/typeset_reference.py)", file=sys.stderr)
         return None
     ja = cv2.imread(str(image))
     erased = cv2.imread(str(render_dir / f"{tag}_erased.png"))

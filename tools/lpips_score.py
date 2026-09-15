@@ -61,11 +61,16 @@ def _crop(arr: np.ndarray, window: List[int]) -> np.ndarray:
     return arr[y0:y1, x0:x1]
 
 
-def score_page(model, stem: str, tag: str, device: str) -> Optional[Dict]:
+def score_page(model, stem: str, tag: str, device: str, *,
+               reference_root: Path = REFERENCE_ROOT,
+               render_root: Path = RENDER_ROOT,
+               metrics_dir: Path = METRICS_DIR) -> Optional[Dict]:
+    """The roots are parameters so the corpus harness can point them at
+    ``demo/output/corpus/`` instead of the single-page ``demo/reference`` tree."""
     import torch
 
-    ref_dir = REFERENCE_ROOT / stem
-    render = RENDER_ROOT / stem / f"{tag}_erased.png"
+    ref_dir = reference_root / stem
+    render = render_root / stem / f"{tag}_erased.png"
     if not render.exists() or not (ref_dir / "blocks.json").exists():
         print(f"{stem}/{tag}: missing render or ground truth", file=sys.stderr)
         return None
@@ -90,8 +95,8 @@ def score_page(model, stem: str, tag: str, device: str) -> Optional[Dict]:
     art = [r["lpips"] for r in rows if r["kind"] == "art"]
     result = {"stem": stem, "tag": tag, "blocks": rows, "mean": float(np.mean([r["lpips"] for r in rows])) if rows else None,
               "mean_art": float(np.mean(art)) if art else None}
-    METRICS_DIR.mkdir(parents=True, exist_ok=True)
-    (METRICS_DIR / f"{stem}_{tag}_lpips.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / f"{stem}_{tag}_lpips.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     return result
 
 

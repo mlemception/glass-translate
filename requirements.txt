@@ -12,6 +12,10 @@ sentencepiece>=0.2
 py3langid>=0.3
 pynput>=1.7
 pytest>=8
+# Dev-only, like pytest above: demo/corpus_index.py reads the JA corpus .rar in pure
+# Python (its entries are STORED, so no external unrar/7z binary is needed).  PyInstaller's
+# analysis starts at run.py and never reaches demo/, so this cannot enter the exe.
+rarfile>=4.0
 pyphen>=0.14
 # Gemini translation provider (plain REST client, no SDK)
 requests>=2.31
