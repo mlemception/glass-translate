@@ -297,6 +297,42 @@ def test_bubble_lines_are_balanced_no_orphan_last_word():
     assert max(widths) / min(widths) < 1.6
 
 
+def test_sentence_breaks_finds_the_beats_and_nothing_else():
+    assert T.sentence_breaks(["NO.", "YOU", "DON'T", "UNDERSTAND,", "MAKI."]) == [0]
+    assert T.sentence_breaks(["WHO...", "ARE", "YOU?!"]) == [0]
+    assert T.sentence_breaks(["HE", "SAID", '"GO."', "THEN", "LEFT."]) == [2]
+    # A clause is not a sentence, a hyphenated head ends its line for another
+    # reason, and the block already ends after the last token.
+    assert T.sentence_breaks(["ONE,", "TWO;", "THREE"]) == []
+    assert T.sentence_breaks(["UNDER-", "STAND", "ME."]) == []
+    assert T.sentence_breaks(["DONE."]) == []
+    assert T.sentence_breaks([]) == []
+
+
+def test_rebalance_ends_a_line_at_the_sentence_and_balances_the_rest():
+    """The letterer's order: break at the beat first, balance inside the pieces.
+
+    The release sets `NO... / YOU DON'T / UNDERSTAND, / MAKI.`; minimising
+    raggedness alone packs the interjection onto line 1 and orphans the verb,
+    giving `NO. YOU / DON'T / UNDERSTAND, / MAKI.`, which reads as a stumble.
+    """
+    lines = ["NO. YOU", "DON'T", "UNDERSTAND,", "MAKI."]
+    budgets = [fake_measure("UNDERSTAND,", 20.0)[0]] * 4
+    out = T._rebalance(lines, budgets, 20.0, fake_measure)
+    assert out == ["NO.", "YOU DON'T", "UNDERSTAND,", "MAKI."]
+    assert len(out) == len(lines), "the line count never moves"
+
+
+def test_rebalance_falls_back_when_the_sentence_breaks_do_not_fit():
+    """Three sentences and two lines: the beats cannot all end a line, so the
+    plain balanced block stands rather than the block falling apart."""
+    lines = ["ONE. TWO.", "THREE. FOUR"]
+    budgets = [fake_measure("ONE. TWO.", 20.0)[0]] * 2
+    out = T._rebalance(lines, budgets, 20.0, fake_measure)
+    assert len(out) == 2
+    assert " ".join(out).split() == ["ONE.", "TWO.", "THREE.", "FOUR"]
+
+
 def test_balanced_breaks_accepts_per_line_limits():
     words = "AA BB CC DD EE FF".split()
     width = T.span_widths(words, 10.0, fake_measure)  # 10 px per word, 5 px per space

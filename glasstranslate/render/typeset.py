@@ -571,7 +571,16 @@ def _rebalance(lines: List[str], budgets: Sequence[float], size: float, measure:
     total = sum(width(i, i + 1) for i in range(len(tokens))) + measure(" ", size)[0] * (len(tokens) - n)
     avail = sum(budgets[:n])
     fill = min(1.0, total / avail) if avail > 0 else 1.0
-    starts = balanced_breaks(len(tokens), n, [b + 1e-6 for b in budgets[:n]], width, [fill * b for b in budgets[:n]], forced)
+    caps = [b + 1e-6 for b in budgets[:n]]
+    tgts = [fill * b for b in budgets[:n]]
+    # The letterer's order: end a line at every sentence end first, and balance
+    # what is left inside each piece.  When those breaks do not fit the lines
+    # available the DP says so (None, or the wrong count) and the plain
+    # balanced block stands, exactly as before.
+    beats = sorted(set(forced) | set(sentence_breaks(tokens)))
+    starts = balanced_breaks(len(tokens), n, caps, width, tgts, beats)
+    if starts is None or len(starts) != n + 1:
+        starts = balanced_breaks(len(tokens), n, caps, width, tgts, forced)
     if starts is None or len(starts) != n + 1:
         return lines
     return [" ".join(tokens[starts[i] : starts[i + 1]]) for i in range(n)]
@@ -859,6 +868,32 @@ def span_widths(words: Sequence[str], size: float, measure: Measure) -> WidthOf:
         return w
 
     return width
+
+
+# A sentence ends at one of these, possibly behind a closing quote or bracket.
+_SENTENCE_END = ".!?…"
+_SENTENCE_CLOSERS = "\"')]}»”’"
+
+
+def sentence_breaks(tokens: Sequence[str]) -> List[int]:
+    """Indexes of the tokens that end a sentence, and so end a line.
+
+    A letterer does not trade sense against rectangle-ness - they break the
+    block at the beat first and balance what is left inside each piece.  The
+    release sets `NO... / YOU DON'T / UNDERSTAND, / MAKI.` and `WHO... /
+    ...ARE / YOU?!`, keeping the interjection whole on its own line;
+    minimising raggedness alone gives `NO. YOU / DON'T / UNDERSTAND, / MAKI.`,
+    which reads as a stumble.
+
+    The last token is never returned - the block already ends there - and nor
+    is a hyphenated word head, which ends its line for a different reason and
+    is forced separately."""
+    out: List[int] = []
+    for i, token in enumerate(tokens[:-1]):
+        stripped = token.rstrip(_SENTENCE_CLOSERS)
+        if stripped and not stripped.endswith("-") and stripped[-1] in _SENTENCE_END:
+            out.append(i)
+    return out
 
 
 def _line_limits(count: int, forced: Sequence[int]) -> List[int]:
