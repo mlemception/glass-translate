@@ -75,11 +75,29 @@ _FLOORED_COMPONENTS = ("c_contain", "c_leftover")
 
 # Headline drop that still counts as noise rather than a regression.
 #
-# MEASURED, not assumed: two identical runs of `--sample 50 --seed 1` (same seed, same
-# code, same cached ground truth) scored 45.72 and 46.48 - a spread of 0.76 - and moved 3
-# of the 200 integer invariant counters.  The render is not bit-deterministic, so an
-# 0.05 tolerance would have failed the gate on noise roughly every other run.
-TOLERANCE = 1.0
+# MEASURED.  This was 1.0, set from "two identical runs of `--sample 50 --seed 1` scored
+# 45.72 and 46.48".  **That 0.76 was an artefact, not noise**:
+# `demo/output/corpus/report-jitter.md` carries `| c_art | - | 0.15 | - |`, i.e. that run
+# never had its LPIPS pass run, so `c_art` was None and the remaining eight weights
+# renormalised - which drops the sample's weakest component out of the product and lifts
+# R.  `c_erase` is identical to four decimals in both runs (0.697184), which is what a
+# deterministic render looks like.
+#
+# The true render-to-render spread, measured three ways:
+#
+#   * folding `base`'s own `c_art` values back into the `jitter` run's components gives
+#     45.6840 against base's 45.7175 - a spread of **0.0335 R**;
+#   * re-scoring `base` from its own cache reproduces 45.72 exactly;
+#   * rendering five pages twice in separate processes (including `v01_p020_36f9fe`,
+#     17 blocks) gives 0 differing pixels of 8,696,332.
+#
+# The only nondeterminism located is the LPIPS pass itself - two identical passes over
+# identical renders differ in 11 of 188 fields, by at most 0.0052 LPIPS, worth under 0.02
+# in `c_art` on one page.  0.15 is ~4.5x the measured spread: enough headroom for that,
+# small enough that a real slice is visible above it.  Evidence and the reproduction:
+# docs/perf/2026-09-15-typeset-corpus.md.  Tightening this can only make the gate harder
+# to pass; never raise it to let a regression through.
+TOLERANCE = 0.15
 
 # ...and for the same reason a single page tripping a hard invariant is weak evidence.
 # The deliberate-defect demonstration moved 11 pages at once, so requiring two keeps all

@@ -282,6 +282,31 @@ def test_compare_baseline_fails_on_headline_drop_beyond_tolerance_message_has_bo
     assert "61.20" in result["message"] and "58.94" in result["message"]
 
 
+# The render-to-render spread measured in docs/perf/2026-09-15-typeset-corpus.md.
+MEASURED_SPREAD_R = 0.0335
+
+
+def test_tolerance_sits_above_the_measured_spread_and_far_below_the_old_one() -> None:
+    """The gate has to be able to see a real slice.
+
+    ``TOLERANCE`` was 1.0, set from "two identical runs scored 45.72 and 46.48".
+    That 0.76 was an artefact: the second run never had its LPIPS pass, so
+    ``c_art`` was None and the other eight weights renormalised.  The true spread
+    is 0.0335 R.  Keep headroom over it - the LPIPS pass is not bit-deterministic -
+    but never so much that an improvement is indistinguishable from noise.
+    """
+    assert MEASURED_SPREAD_R < CS.TOLERANCE <= 0.30
+
+
+def test_compare_baseline_fails_on_a_drop_the_old_tolerance_hid() -> None:
+    """A half-point drop is 15x the measured spread; TOLERANCE = 1.0 waved it through."""
+    baseline = _run(46.21, {})
+    current = _run(45.71, {})
+    result = CS.compare_baseline(current, baseline)
+    assert result["headline_drop"] is True
+    assert result["passed"] is False
+
+
 def test_compare_baseline_passes_on_drop_within_tolerance() -> None:
     baseline = _run(60.0, {})
     current = _run(60.0 - CS.TOLERANCE, {})  # exactly at the edge: not "beyond" tolerance
