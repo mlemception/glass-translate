@@ -13,9 +13,11 @@ ranking the work wrongly.
 ### Added
 
 - **Reference-free self-checks** (`glasstranslate/render/selfcheck.py`). Three invariants
-  that need only the render and the text it was handed, so unlike every other measurement
-  in this project they also hold in normal use, on a page with no reference to compare
-  against:
+  that need only the render and the text it was handed, rather than a professionally
+  lettered page to compare against — so unlike every other measurement in this project they
+  *can* run outside the evaluation harness. **Today only the harness calls them**; the app
+  does not, so they are absent from the frozen executable. Wiring them into the live render
+  path is future work:
   - `text_complete` — every character handed to the typesetter reached the page;
   - `breaks_clean` — the drawn lines read back as the text given, breaking only at a space
     or behind a hyphen (this is what catches `BEINGAN ADULTISSO CONFUSING!`);
