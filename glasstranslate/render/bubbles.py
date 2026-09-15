@@ -68,6 +68,21 @@ _WAIST_LEVELS = (0.35, 0.5, 0.65, 0.8)
 # room counts as holding the block.
 _COVER = 0.5
 _RIM = np.ones((3, 3), np.uint8)  # the one-pixel collar :func:`_measure_walls` looks at
+# A room traced from the ink has to hold this much of a block's source
+# footprint before it is offered as that block's balloon.  It rejects the
+# counter of a glyph, which is a closed contour a few pixels across sitting
+# inside the very text we are asking about.
+INK_ROOM_MIN_COVER = 0.95
+# And it has to be roomier than the text by this much (room area over source
+# footprint area).  A balloon holds its lettering with air around it; a room
+# the size of the text is the outline of the text itself, or a caption box
+# with no margin to re-letter into, and adopting one only shrinks the type.
+# Measured over the corpus: the balloon this rescue exists for is 2.7x, the
+# two rooms that shrank their block to half-size are 1.6x and 1.0x.
+INK_ROOM_MIN_ROOMINESS = 2.0
+# The value :func:`ink_rooms` floods the page's open paper with.  Any value
+# that is neither 0 nor 255 does; paper is 255 and ink 0 going in.
+_FLOOD_MARK = 128
 
 
 @dataclass
@@ -136,6 +151,56 @@ def inset(region: np.ndarray, margin: int) -> np.ndarray:
     caption box's outer sides) would not be pulled in at all."""
     padded = np.pad(region.view(np.uint8), 1)
     return (cv2.distanceTransform(padded, cv2.DIST_L2, 5) > margin)[1:-1, 1:-1]
+
+
+def ink_rooms(gray: np.ndarray) -> Tuple[int, np.ndarray, np.ndarray]:
+    """Label every area the page's *ink* closes around.
+
+    The paper pass above asks which patch of background a block sits on, and
+    that patch leaks: a balloon drawn on white page white is one region with
+    the page unless every pixel of its outline survives into the paper map,
+    which is not something the map promises - it paints each OCR box in as
+    paper, so a box lying across a balloon's wall cuts it.
+
+    The ink does not leak.  A room is paper the page edge cannot reach: flood
+    the paper inwards from the border, and whatever it never arrives at is
+    enclosed by ink on every side.  Closing the holes in *that* takes each
+    room whole, the lettering standing in it included.  A room found this way
+    is walled by construction - the measurement :func:`_measure_walls` cannot
+    make about a patch that was cut rather than sealed.
+
+    Two flood fills and a labelling, all linear in the page: 16 ms on a
+    1222x1920 page of screentone.  Tracing the contour hierarchy instead and
+    filling each hole in turn is the same idea and takes 68 seconds on that
+    page, because a screened panel has eighteen thousand enclosed contours and
+    each fill costs a full-page raster.
+
+    Returns ``(count, labels, stats)`` as ``connectedComponentsWithStats``
+    does.  Everything ink closes around is a room here, balloon or not: a
+    panel border encloses its panel, a screentone dot encloses nothing worth
+    having.  Telling a balloon from either is the caller's job, and
+    :mod:`.layout` does it with the size and shape gates it already applies to
+    paper.
+    """
+    _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    paper = cv2.bitwise_not(ink)
+    # Paper the border reaches.  The page is padded with paper first so a
+    # balloon running off the edge of the frame still counts as open.
+    reached = cv2.copyMakeBorder(paper, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=255)
+    cv2.floodFill(reached, np.zeros((reached.shape[0] + 2, reached.shape[1] + 2), np.uint8),
+                  (0, 0), _FLOOD_MARK)
+    free = reached[1:-1, 1:-1] == _FLOOD_MARK
+    enclosed = np.where((paper > 0) & ~free, 255, 0).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(_close_holes(enclosed),
+                                                               connectivity=8)
+    return count, labels, stats
+
+
+def _close_holes(mask: np.ndarray) -> np.ndarray:
+    """``mask`` (0/255) with everything it surrounds filled in."""
+    pad = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    cv2.floodFill(pad, np.zeros((pad.shape[0] + 2, pad.shape[1] + 2), np.uint8), (0, 0), 255)
+    return mask | cv2.bitwise_not(pad)[1:-1, 1:-1]
 
 
 # --------------------------------------------------------------- geometry

@@ -260,10 +260,12 @@ class _PaperMaps:
         self._gray = gray
         self._boxes = text_boxes
         self._maps: Dict[bool, Tuple[np.ndarray, np.ndarray]] = {}
+        self._paper: Dict[bool, np.ndarray] = {}
+        self._rooms: Optional[Tuple[int, np.ndarray, np.ndarray]] = None
 
-    def get(self, dark: bool) -> Tuple[np.ndarray, np.ndarray]:
-        """``(labels, stats)`` as returned by ``connectedComponentsWithStats``."""
-        cached = self._maps.get(dark)
+    def paper(self, dark: bool) -> np.ndarray:
+        """The 0/1 paper mask the components are labelled from."""
+        cached = self._paper.get(dark)
         if cached is not None:
             return cached
         mask = (self._gray < _DARK_THRESHOLD) if dark else (self._gray > _LIGHT_THRESHOLD)
@@ -272,9 +274,25 @@ class _PaperMaps:
         for box in self._boxes:
             g = _grow(box, _TEXT_PAD, _TEXT_PAD, w, h)
             mask[g.y : g.y2, g.x : g.x2] = 1
-        _, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=4)
+        self._paper[dark] = mask
+        return mask
+
+    def get(self, dark: bool) -> Tuple[np.ndarray, np.ndarray]:
+        """``(labels, stats)`` as returned by ``connectedComponentsWithStats``."""
+        cached = self._maps.get(dark)
+        if cached is not None:
+            return cached
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(self.paper(dark), connectivity=4)
         self._maps[dark] = (labels, stats)
         return labels, stats
+
+    def rooms(self) -> Tuple[int, np.ndarray, np.ndarray]:
+        """``(count, labels, stats)`` over the areas the page's ink closes
+        around; see :func:`bubbles.ink_rooms`.  Traced once per page, and only
+        when a block the paper pass could not place asks for it."""
+        if self._rooms is None:
+            self._rooms = bubbles.ink_rooms(self._gray)
+        return self._rooms
 
     def label_at(self, dark: bool, rect: Rect) -> int:
         labels, _ = self.get(dark)
@@ -627,6 +645,62 @@ def _is_bubble(interior: Optional[bubbles.Interior], spec: _Spec) -> bool:
     )
 
 
+def _ink_interior(maps: _PaperMaps, spec: _Spec,
+                  others: Sequence[Rect] = ()) -> Optional[bubbles.Interior]:
+    """The balloon the page's *ink* closes around this block, or None.
+
+    Only asked when the paper pass placed the block nowhere, and it can only
+    add a balloon, never take one away.  The room comes from
+    :func:`bubbles.ink_rooms` and is offered with ``walled=1.0``: ink encloses
+    it on every side, which is exactly what the paper could not promise.
+    Every other gate in :func:`_is_bubble` still runs, so a panel border - a
+    closed contour too - is rejected on size as it always was.
+
+    The room is taken **whole**, glyph holes and all, which is the opposite of
+    what :func:`_bubble_region` does for a paper interior and is deliberate.
+    A paper interior keeps its holes because the ground truth derives its own
+    interior from the same paper map and has the same ones; a rescued balloon
+    has no such twin - its interior is redrawn wholesale, so the holes are not
+    obstacles, they are the very lettering about to be erased.  Keeping them
+    drags the inscribed circle the lettering is anchored on into the gaps
+    between the source characters: on a vertical block whose furigana sit down
+    one side, that is a measured 48 px of the anchor, and the balloon is
+    lettered small and off its own axis."""
+    src = spec.source_rect
+    count, labels, stats = maps.rooms()
+    if count <= 1:
+        return None
+    cy = min(labels.shape[0] - 1, max(0, src.y + src.h // 2))
+    cx = min(labels.shape[1] - 1, max(0, src.x + src.w // 2))
+    room = int(labels[cy, cx])
+    if room <= 0:
+        return None
+    x, y, w, h, _ = (int(v) for v in stats[room])
+    rect = Rect(x, y, w, h)
+    if not _holds(rect, src):
+        return None
+    region = (labels[rect.y : rect.y2, rect.x : rect.x2] == room)
+    # The counter of a glyph is a closed contour sitting inside the very text
+    # being asked about; it holds the footprint's bounding box only by
+    # accident, never its pixels.
+    window = region[max(0, src.y - rect.y) : src.y2 - rect.y, max(0, src.x - rect.x) : src.x2 - rect.x]
+    if window.size == 0 or float(window.mean()) < bubbles.INK_ROOM_MIN_COVER:
+        return None
+    area = int(region.sum())
+    if area < bubbles.INK_ROOM_MIN_ROOMINESS * max(1, src.w * src.h):
+        return None
+    # A room with someone else's text in it is shared, and dividing a shared
+    # room between its occupants is what :func:`bubbles.interiors` does with
+    # the paper - the rescue has none of that machinery and would hand the
+    # whole room to each of them.  Leave those to the paper pass.
+    for other in others:
+        oy = min(labels.shape[0] - 1, max(0, other.y + other.h // 2))
+        ox = min(labels.shape[1] - 1, max(0, other.x + other.w // 2))
+        if int(labels[oy, ox]) == room:
+            return None
+    return bubbles.Interior(rect, region, area, walled=1.0)
+
+
 def _bubble_region(interior: bubbles.Interior, spec: _Spec) -> Optional[np.ndarray]:
     """The lettering area inside a balloon: the interior with its holes
     closed, inset by ``_BUBBLE_MARGIN_EM`` ems and reduced to the one piece
@@ -681,7 +755,8 @@ def _open_layout(spec: _Spec, maps: _PaperMaps, width: int, height: int) -> Tupl
 
 
 def _make_block(
-    img: np.ndarray, spec: _Spec, interior: Optional[bubbles.Interior], maps: _PaperMaps
+    img: np.ndarray, spec: _Spec, interior: Optional[bubbles.Interior], maps: _PaperMaps,
+    others: Sequence[Rect] = ()
 ) -> TextBlock:
     height, width = img.shape[:2]
     layout_box: Rect
@@ -689,6 +764,14 @@ def _make_block(
     layout_seed: Optional[Rect] = None
     bubble: Optional[Rect] = None
     inset = _bubble_region(interior, spec) if _is_bubble(interior, spec) else None
+    if inset is None:
+        # The paper placed this block nowhere.  Its balloon may still be drawn:
+        # ask the ink before giving up and lettering over the artwork.
+        rescued = _ink_interior(maps, spec, others)
+        if rescued is not None and _is_bubble(rescued, spec):
+            rescued_inset = _bubble_region(rescued, spec)
+            if rescued_inset is not None:
+                interior, inset = rescued, rescued_inset
     if inset is not None and interior is not None:
         layout_box = bubble = interior.rect
         layout_mask = inset
@@ -783,7 +866,11 @@ def build_blocks(
             furigana_by_main.setdefault(l.furigana_of, []).append(i)
     specs = [_spec(lines, members, [f for m in members for f in furigana_by_main.get(m, [])]) for members in groups]
     interiors = _interiors(maps, specs, width, height)
-    blocks = [_make_block(img_bgr, spec, interior, maps) for spec, interior in zip(specs, interiors)]
+    blocks = [
+        _make_block(img_bgr, spec, interior, maps,
+                    [o.source_rect for j, o in enumerate(specs) if j != i])
+        for i, (spec, interior) in enumerate(zip(specs, interiors))
+    ]
     _uniform_font_sizes(blocks)
     t1 = time.perf_counter()
     erase.apply(img_bgr, blocks, all_segments if all_segments is not None else segments, gray=gray)
