@@ -101,14 +101,22 @@ inside `config\`. Delete that file first.
 
 Curious how it works, want to build it yourself, or want to add your own translation engine?
 
-### → **[Technical documentation](docs/TECHNICAL.md)**
+### → **[Technical documentation (wiki)](https://github.com/mlemception/glass-translate/wiki)**
 
 Architecture, every dependency and why it was chosen, the portable-bundle format, how manga
 lettering actually works, the generative quality renderer, the test suites, and a full list of
 known limitations.
 
-Also: [module contracts](docs/ARCHITECTURE.md) · [control-window design](docs/GLASS_DESIGN.md) ·
-[model licences](renderer/MODELS.md) · [benchmarks](docs/perf/)
+Jump straight to:
+[Architecture](https://github.com/mlemception/glass-translate/wiki/Architecture) ·
+[Manga typesetting](https://github.com/mlemception/glass-translate/wiki/Manga-Typesetting) ·
+[Quality renderer](https://github.com/mlemception/glass-translate/wiki/Quality-Renderer) ·
+[Building from source](https://github.com/mlemception/glass-translate/wiki/Building-from-Source) ·
+[Known limitations](https://github.com/mlemception/glass-translate/wiki/Known-Limitations)
+
+Also in this repo: [module contracts](docs/ARCHITECTURE.md) ·
+[control-window design](docs/GLASS_DESIGN.md) · [model licences](renderer/MODELS.md) ·
+[benchmarks](docs/perf/)
 
 ---
 
