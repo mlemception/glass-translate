@@ -1,0 +1,127 @@
+{
+ "version": 1,
+ "chosen_with_seed": 20260915,
+ "note": "Chosen once. Never re-choose: resampling this set would let the eyeball review improve without the typesetter improving.",
+ "pairs": [
+  {
+   "page_id": "v00_p197_7834c4",
+   "volume": 0,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v01_p185_3506da",
+   "volume": 1,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v05_p111_c2c11d",
+   "volume": 5,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v11_p059_e1e21a",
+   "volume": 11,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v12_p017_434c92",
+   "volume": 12,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v14_p053_abfbed",
+   "volume": 14,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v15_p057_f8b7fc",
+   "volume": 15,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v16_p078_3d30fe",
+   "volume": 16,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v19_p093_30bee9",
+   "volume": 19,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v21_p168_317aec",
+   "volume": 21,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v22_p069_6be7d1",
+   "volume": 22,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v24_p039_70c75d",
+   "volume": 24,
+   "category": "bubble"
+  },
+  {
+   "page_id": "v08_p000_d6725b",
+   "volume": 8,
+   "category": "colour"
+  },
+  {
+   "page_id": "v10_p000_997e18",
+   "volume": 10,
+   "category": "colour"
+  },
+  {
+   "page_id": "v12_p000_5c3b39",
+   "volume": 12,
+   "category": "colour"
+  },
+  {
+   "page_id": "v06_p062_e05f9d",
+   "volume": 6,
+   "category": "free_text"
+  },
+  {
+   "page_id": "v07_p142_08fbd1",
+   "volume": 7,
+   "category": "free_text"
+  },
+  {
+   "page_id": "v10_p102_9e4a22",
+   "volume": 10,
+   "category": "free_text"
+  },
+  {
+   "page_id": "v20_p022_bb4341",
+   "volume": 20,
+   "category": "free_text"
+  },
+  {
+   "page_id": "v22_p143_edd13b",
+   "volume": 22,
+   "category": "free_text"
+  },
+  {
+   "page_id": "v23_p142_b815bb",
+   "volume": 23,
+   "category": "free_text"
+  },
+  {
+   "page_id": "v02_p176h1_9bb7c2",
+   "volume": 2,
+   "category": "spread"
+  },
+  {
+   "page_id": "v06_p152h1_f6e47c",
+   "volume": 6,
+   "category": "spread"
+  },
+  {
+   "page_id": "v13_p186h0_2b034e",
+   "volume": 13,
+   "category": "spread"
+  }
+ ]
+}
