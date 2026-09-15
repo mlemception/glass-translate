@@ -132,10 +132,14 @@ def reference_dir(stem: str) -> Path:
     return REFERENCE_ROOT / stem
 
 
-def reference_text_path(stem: str) -> Path:
+def reference_text_path(stem: str, root: Optional[Path] = None) -> Path:
     """``demo/reference_text_<stem>.json``; the example page also accepts the
-    legacy ``demo/reference_text.json`` when the new name is absent."""
-    path = DEMO_DIR / f"reference_text_{stem}.json"
+    legacy ``demo/reference_text.json`` when the new name is absent.
+
+    ``root`` redirects the file elsewhere.  The corpus harness passes one, because
+    ``demo/`` is tracked and the harness bootstraps one of these per corpus page."""
+    base = Path(root) if root is not None else DEMO_DIR
+    path = base / f"reference_text_{stem}.json"
     if stem == "before" and not path.exists():
         legacy = DEMO_DIR / LEGACY_REFERENCE_TEXT
         if legacy.exists():
@@ -143,10 +147,10 @@ def reference_text_path(stem: str) -> Path:
     return path
 
 
-def load_reference_text(stem: str) -> Dict[str, str]:
+def load_reference_text(stem: str, root: Optional[Path] = None) -> Dict[str, str]:
     """Reference English per OCR block text; keys starting with ``_`` are
     notes (``_comment``, ``_uncertain``) and never match a block."""
-    path = reference_text_path(stem)
+    path = reference_text_path(stem, root)
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -463,7 +467,8 @@ def run_page(args: argparse.Namespace, image: Path, out_dir: Path) -> int:
 
     texts = [b.segment.text for b in blocks]
     translations = load_translations(texts, stem, args.src, args.tgt, args.translate, args.device, args.models)
-    reference = load_reference_text(stem) if args.ref_text else {}
+    reference = (load_reference_text(stem, getattr(args, "reference_text_root", None))
+                 if args.ref_text else {})
 
     translated: List[TranslatedSegment] = []
     from_ref: List[bool] = []

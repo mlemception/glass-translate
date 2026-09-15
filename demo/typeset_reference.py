@@ -101,6 +101,11 @@ class AlignResult:
     method: str
     score: float
     note: str = ""
+    # RANSAC inliers behind the ORB estimate.  The Pearson ``score`` overlaps between true
+    # and false page pairs (measured: true min 0.192 vs false max 0.193), so a corpus
+    # verifier must read this count instead - true pairs run into the hundreds, random
+    # non-pairs never clear ~20.  0 when the homography did not come from ORB.
+    inliers: int = 0
 
 
 def _normalize(h: np.ndarray) -> np.ndarray:
@@ -216,6 +221,8 @@ def align_pages(
 
     scaled, s_pre = _prescale(eng_gray, ja_gray.shape[:2])
     h_s, n_in = _orb_homography(ja_gray, scaled)
+    # n_in is the inlier count only when ORB succeeded; on failure it is the raw match count.
+    inliers = n_in if h_s is not None else 0
     method, note = "orb", f"{n_in} ORB inliers"
     if h_s is None:
         h_s, method, note = np.eye(3), "scale", f"ORB failed ({n_in} matches); pure scale"
@@ -225,7 +232,7 @@ def align_pages(
         method, note = "ecc", f"{note}; ECC cc {cc:.4f}"
     h = _normalize(h_s @ s_pre)
     score = alignment_score(ja_gray, warp_reference(eng_gray, h, ja_gray.shape))
-    return AlignResult(h, method, score, note)
+    return AlignResult(h, method, score, note, inliers)
 
 
 def warp_reference(eng: np.ndarray, homography: np.ndarray, shape: Tuple[int, ...]) -> np.ndarray:
@@ -605,9 +612,15 @@ def _seg_record(seg: Segment) -> Dict[str, Any]:
 
 def derive(image: Path, *, out_root: Path = TD.REFERENCE_ROOT, device: str = "auto", refresh_ocr: bool = False,
            pairs: Optional[Sequence[Tuple[Tuple[float, float], Tuple[float, float]]]] = None, crops: bool = False,
-           min_confidence: float = 0.5) -> Optional[Path]:
-    """Align, derive and write the ground truth of one page; returns its directory."""
-    ref = TD.reference_image_for(image)
+           min_confidence: float = 0.5, reference: Optional[Path] = None,
+           reference_text_root: Optional[Path] = None) -> Optional[Path]:
+    """Align, derive and write the ground truth of one page; returns its directory.
+
+    ``reference`` names the lettered page explicitly.  The default lookup only finds
+    ``<n>eng.*`` sitting next to ``<n>ja.*`` on disk, which cannot see a page that lives
+    inside a ``.cbz``; the corpus harness materialises both sides and passes them here.
+    """
+    ref = Path(reference) if reference is not None else TD.reference_image_for(image)
     if ref is None:
         print(f"{image}: no reference image", file=sys.stderr)
         return None
@@ -691,7 +704,8 @@ def derive(image: Path, *, out_root: Path = TD.REFERENCE_ROOT, device: str = "au
         "blocks": records, "unassigned_english": [_seg_record(s) for s in unassigned],
     }, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    ref_text = TD.reference_text_path(stem)
+    ref_text = TD.reference_text_path(stem, reference_text_root)
+    ref_text.parent.mkdir(parents=True, exist_ok=True)
     if not ref_text.exists():
         data: Dict[str, Any] = {
             "_comment": f"English lettering of {ref.name} keyed by the OCR block text of {image.name}; bootstrapped by "
