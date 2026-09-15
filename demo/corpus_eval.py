@@ -190,8 +190,24 @@ def shared_ink_ratio(ja_gray: np.ndarray, eng_gray: np.ndarray) -> float:
     return float(np.count_nonzero(ja_ink & grown.astype(bool))) / total
 
 
-def render_args(tag: str, device: str, models: Path, quiet: bool = True) -> Namespace:
-    """The ``typeset_dev.run_page`` namespace for a corpus page."""
+def sidecar_python() -> Optional[Path]:
+    """``renderer\\.venv\\Scripts\\python.exe``, or None when the sidecar venv is absent.
+
+    The app and this harness are torch-free; the generative stages live in their own
+    interpreter (``renderer/install.bat``).  ``--quality`` needs it."""
+    candidates = [PROJECT_ROOT / "renderer" / ".venv" / "Scripts" / "python.exe",
+                  PROJECT_ROOT / "renderer" / ".venv" / "bin" / "python"]
+    return next((p for p in candidates if p.exists()), None)
+
+
+def render_args(tag: str, device: str, models: Path, quiet: bool = True,
+                quality: bool = False) -> Namespace:
+    """The ``typeset_dev.run_page`` namespace for a corpus page.
+
+    ``quality`` runs the render with the sidecar attached, so free text over artwork is
+    reconstructed by manga big-LaMa plus Illustrious-XL instead of the plain eraser.  It
+    needs a GPU and the 9.3 GB of models under ``<models>/quality``; every corpus number
+    recorded before 2026-09-15 is the plain eraser."""
     # ref_text=True letters our blocks with the official English that ``derive`` read off
     # the reference page, so both sides carry the SAME words.  Without it c_textiou and
     # c_lines punish a correct render whenever the machine translation differs in length
@@ -200,7 +216,7 @@ def render_args(tag: str, device: str, models: Path, quiet: bool = True) -> Name
     return Namespace(tag=tag, ocr=False, translate=False, ref_text=True,
                      reference_text_root=REFTEXT_DIR,
                      src="ja", tgt="en", device=device, models=models,
-                     min_confidence=0.5, no_upper=False, quality=False,
+                     min_confidence=0.5, no_upper=False, quality=bool(quality),
                      quality_fake=False, quality_params="", new_erase=False,
                      new_place=False, regions="none", no_ref_image=True, quiet=quiet,
                      batch=False, out=RENDER_DIR)
@@ -209,7 +225,8 @@ def render_args(tag: str, device: str, models: Path, quiet: bool = True) -> Name
 # --------------------------------------------------------------------- one page
 def evaluate_page(pair: Dict[str, Any], ja_archive: CI.Archive, en_archive: CI.Archive,
                   *, tag: str, device: str, models: Path,
-                  refresh: bool = False, refresh_render: bool = False) -> Dict[str, Any]:
+                  refresh: bool = False, refresh_render: bool = False,
+                  render_ns: Optional[Namespace] = None) -> Dict[str, Any]:
     """Derive the ground truth, render, score, and fold into the headline components."""
     import typeset_dev as TD
     import typeset_metrics as TM
@@ -247,7 +264,11 @@ def evaluate_page(pair: Dict[str, Any], ja_archive: CI.Archive, en_archive: CI.A
 
     render_dir = RENDER_DIR / page_id
     if refresh or refresh_render or not (render_dir / f"{tag}_blocks.json").exists():
-        code = TD.run_page(render_args(tag, device, models), ja_path, render_dir)
+        # One namespace for the whole run when the caller passes it: typeset_dev caches
+        # the live sidecar on it as `_quality_client`, so --quality pays the ~47 s cold
+        # start once instead of once per page.
+        code = TD.run_page(render_ns if render_ns is not None
+                           else render_args(tag, device, models), ja_path, render_dir)
         if code != 0:
             return {"page_id": page_id, "status": "skipped",
                     "reason": f"render exit {code}"}
@@ -519,8 +540,9 @@ def load_baseline(tag: str) -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------- driver
 def run_corpus(selected: Sequence[Dict[str, Any]], *, tag: str, corpus: Path,
                device: str, models: Path, refresh: bool = False,
-               refresh_render: bool = False,
+               refresh_render: bool = False, quality: bool = False,
                progress: bool = True) -> List[Dict[str, Any]]:
+    render_ns = render_args(tag, device, models, quality=quality)
     ja_archive = CI.open_archive(corpus / CI.JA_ARCHIVE_NAME)
     en_cache: Dict[str, CI.Archive] = {}
     rows: List[Dict[str, Any]] = []
@@ -540,7 +562,7 @@ def run_corpus(selected: Sequence[Dict[str, Any]], *, tag: str, corpus: Path,
             try:
                 row = evaluate_page(pair, ja_archive, en_cache[key], tag=tag,
                                     device=device, models=models, refresh=refresh,
-                                    refresh_render=refresh_render)
+                                    refresh_render=refresh_render, render_ns=render_ns)
             except Exception as exc:  # report the page, never hide it
                 row = {"page_id": pair["page_id"], "status": "skipped",
                        "reason": f"{type(exc).__name__}: {exc}"}
@@ -585,6 +607,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "re-rendering (fast, but the gate then judges code that may "
                              "not have produced them)")
     parser.add_argument("--no-crops", action="store_true")
+    parser.add_argument("--quality", action="store_true",
+                        help="render free text over artwork with the generative sidecar "
+                             "(quality_renderer=auto) instead of the plain eraser; needs a "
+                             "GPU, the renderer venv and <models>/quality")
     args = parser.parse_args(argv)
 
     payload = CP.load_pairs(args.pairs)
@@ -604,7 +630,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # changes it never exercised.  The ground truth is NOT re-derived - it depends on the
     # corpus, not on our code, and re-deriving it would re-run OCR on every page.
     refresh_render = bool(args.baseline) and not args.reuse_renders
-    rows = run_corpus(selected, tag=args.tag, corpus=Path(args.corpus),
+    if getattr(args, "quality", False) and sidecar_python() is None:
+        print(r"corpus_eval: --quality needs the sidecar venv (run renderer\install.bat)",
+              file=sys.stderr)
+        return 2
+    rows = run_corpus(selected, tag=args.tag, corpus=Path(args.corpus), quality=args.quality,
                       device=args.device, models=args.models, refresh=args.refresh,
                       refresh_render=refresh_render)
     scored = [r for r in rows if r.get("status") == "scored"]
