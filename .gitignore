@@ -28,3 +28,10 @@ renderer/.venv/
 # Local corpus of third-party volumes used to eyeball the typesetter (~16 GB of
 # .cbz/.rar).  Anchored to the repo root; never committed.
 /JA vs. EN/
+# Ground truth and OCR caches derived from those licensed pages.
+# typeset_reference.derive() writes eng_aligned.png - a full warped copy of the reference
+# page - under demo/reference/<stem>/, and the corpus harness would otherwise stage
+# thousands of them.  Anchored to the repo root.  (Ignoring a path does not untrack what is
+# already tracked: the files committed before this rule existed are still in the index.)
+/demo/reference/
+/demo/cache/
