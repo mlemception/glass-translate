@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import re
 import sys
 from pathlib import Path
 
@@ -94,6 +95,20 @@ def test_qt_message_handler_routes_to_qt_logger(caplog: pytest.LogCaptureFixture
 
 
 def test_version() -> None:
+    """The version is well-formed and is the one the build stamps into the exe.
+
+    ``glasstranslate/__init__.py`` is the single source of truth: the build reads it
+    with ``make_version_info.read_package_version()``.  Asserting the two agree keeps
+    a bump honest without pinning a literal here that every release has to chase.
+    """
     import glasstranslate
 
-    assert glasstranslate.__version__ == "0.2.0"
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packaging"))
+    try:
+        from make_version_info import read_package_version
+    finally:
+        sys.path.pop(0)
+
+    version = glasstranslate.__version__
+    assert re.fullmatch(r"\d+\.\d+\.\d+[0-9A-Za-z.-]*", version), version
+    assert read_package_version() == version
