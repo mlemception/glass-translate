@@ -90,6 +90,23 @@ HOUGH_OUTSIDE = 0.4  # glyphs of a straight line outside the text zone to count 
 HOUGH_OUTSIDE_HATCH = 0.15  # ...for a line in a direction of the hatching field around the text
 HOUGH_EXTEND = 1.2  # glyphs a kept art line is extrapolated on each side through the text zone
 HOUGH_MAX_LINES = 30  # longest candidate lines followed per block (hatching yields hundreds)
+# px: the largest glyph the art-line DETECTOR scales its thresholds by.
+#
+# Everything else in this module is a multiple of the block's glyph because it describes the
+# lettering.  These two do not: they describe the ARTWORK, and artwork does not get bigger
+# because the lettering beside it does.  Measured over the 50-page sample, the straight-line
+# lengths of a page's art are the same everywhere regardless of its lettering scale - p50 14
+# to 24 px, p75 23 to 47 px - while `HOUGH_MIN_LEN * glyph` ranges from 24 px to 193 px.  So
+# on `v21_p145_5879c9` (page lettering 241 px) art protection demanded a 193 px straight run
+# and **0.2 % of that page's art lines could supply one**, against 46 % on a page lettered at
+# 33 px.  Art protection was therefore switched off on exactly the pages where the erase
+# reach is largest - the same compounding failure the page-glyph cap fixed in the other half.
+#
+# The glyph strokes are already removed from the mask Hough runs on (`art[sel_mask] = 0` in
+# `_keep_art`), so a lower minimum cannot start reading lettering as artwork.  38 px is the
+# corpus-median page lettering scale, i.e. the requirement a normally lettered page already
+# makes; 25 of the 49 pages are bit-identical under it.
+HOUGH_GLYPH_MAX = 38.0
 LINE_REACH = 4  # px looked at on each side of a followed line to measure the ink run across it
 LINE_SNAP = 2  # px the followed line may drift off the ink and still be snapped onto it
 LINE_SLACK = 1.5  # px a run inside the text may exceed the line's own thickness and still be line
@@ -525,11 +542,30 @@ def _follow_lines(
     return True
 
 
+def detector_glyph(glyph: float) -> float:
+    """The glyph size the art-line *detector* scales its thresholds by.
+
+    What a run of ink must look like to BE a drawn line - how long it is
+    (``HOUGH_MIN_LEN``) and how much support it has outside the text
+    (``HOUGH_OUTSIDE``) - is a fact about the **artwork**, and artwork does not
+    get bigger because the lettering beside it does.  So those thresholds stop
+    scaling once the block is lettered larger than a normal page
+    (:data:`HOUGH_GLYPH_MAX`).
+
+    Everything about the *text* keeps the block's own glyph: how far a kept
+    line is extrapolated through the text zone (``HOUGH_EXTEND``), the sweep,
+    the window, the corridor.  Only the two detector thresholds are capped, and
+    capping them can only keep MORE art, never erase more.
+    """
+    return min(float(glyph), HOUGH_GLYPH_MAX)
+
+
 def _art_lines(ctx: _Ctx, art: np.ndarray, ink: np.ndarray, zone: np.ndarray) -> Optional[np.ndarray]:
     """Pixels (bool mask) of straight art lines that enter the text zone:
     detected on ``art`` (uint8, glyphs removed) with real support outside the
     zone, followed through it on the full ``ink``."""
     g = ctx.glyph
+    gd = detector_glyph(g)
     ext = HOUGH_EXTEND * g
     zb = _bbox(zone)
     if zb is None:
@@ -542,8 +578,8 @@ def _art_lines(ctx: _Ctx, art: np.ndarray, ink: np.ndarray, zone: np.ndarray) ->
         np.ascontiguousarray(art[roi.y : roi.y2, roi.x : roi.x2]) * 255,
         1,
         np.pi / 180.0,
-        threshold=max(8, int(0.4 * g)),
-        minLineLength=max(8, int(HOUGH_MIN_LEN * g)),
+        threshold=max(8, int(0.4 * gd)),
+        minLineLength=max(8, int(HOUGH_MIN_LEN * gd)),
         maxLineGap=3,
     )
     if lines is None:
@@ -568,12 +604,16 @@ def _art_lines(ctx: _Ctx, art: np.ndarray, ink: np.ndarray, zone: np.ndarray) ->
     cand = cand[np.argsort(-lengths[cand])[:HOUGH_MAX_LINES]]
     # Strokes of a hatching field around the text need less support outside
     # the text: they are mostly under it.
-    min_outside = np.full(cand.size, HOUGH_OUTSIDE * g)
+    # How much support a line needs OUTSIDE the text zone is a fact about the artwork too:
+    # on a page lettered at 241 px this demanded 96 px of clear run before a line counted as
+    # art at all, which is most of a panel.  Capped with the detector's glyph for the same
+    # reason - and capping it can only keep MORE art, never erase more.
+    min_outside = np.full(cand.size, HOUGH_OUTSIDE * gd)
     if ctx.hatch_dirs is not None and ctx.hatch_dirs.size:
         ang = np.degrees(np.arctan2(dy[cand], dx[cand])) % 180.0
         diff = np.abs(ang[:, None] - ctx.hatch_dirs[None, :])
         diff = np.minimum(diff, 180.0 - diff)
-        min_outside[(diff <= HATCH_ANGLE).any(axis=1)] = HOUGH_OUTSIDE_HATCH * g
+        min_outside[(diff <= HATCH_ANGLE).any(axis=1)] = HOUGH_OUTSIDE_HATCH * gd
     keep = np.zeros(zone.shape, dtype=bool)
     t_lo = np.minimum(0.0, t0[cand] - 2.0)
     t_hi = np.maximum(lengths[cand], t1[cand] + 2.0)

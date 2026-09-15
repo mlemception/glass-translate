@@ -71,7 +71,17 @@ COMPONENT_WEIGHTS: dict[str, float] = {
 # degenerate-output audit pins.  At 0.005 a blown exponential still costs a factor of ~0.6
 # at weight 0.10 and ~0.34 at weight 0.20, so it hurts badly without annihilating.
 COMPONENT_FLOOR = 0.005
-_FLOORED_COMPONENTS = ("c_contain", "c_leftover")
+# c_centre joined them, and it is a BOUNDED ramp, so the paragraph above needs qualifying:
+# the audit's rule is that a component reaching 0 must zero the page, and that conflates two
+# different zeros - "drew nothing" (degenerate) and "drew it badly" (ordinary variation).
+# c_centre reaches 0 at CENTRE_SPAN, and CENTRE_SPAN is VIZ's OWN p90 (1.10 em): a tenth of
+# the release's own balloons sit at or past the point where this component annihilates a
+# page.  A component whose zero the ground truth itself reaches cannot be absorbing.  It
+# held five of the eleven R = 0 pages down (v04_p093, v05_p026, v12_p140, v13_p004h1,
+# v16_p143), every one of them with lettering actually drawn - badly placed, not missing.
+# Nothing here weakens the real degenerate guards: lettering nothing is caught by
+# `answered`, erasing nothing by c_erase, bleaching a balloon by c_erase's art_kept.
+_FLOORED_COMPONENTS = ("c_contain", "c_leftover", "c_centre")
 
 # Headline drop that still counts as noise rather than a regression.
 #
@@ -177,9 +187,15 @@ def c_group(group_f1: float | None) -> float | None:
     return None if group_f1 is None else _clamp01(group_f1)
 
 
-def c_lines(line_exact: float | None) -> float | None:
-    """Identity pass-through of ``line_exact``, clamped to [0, 1]."""
-    return None if line_exact is None else _clamp01(line_exact)
+def c_lines(line_closeness: float | None) -> float | None:
+    """Identity pass-through of ``line_closeness``, clamped to [0, 1].
+
+    Its input used to be ``line_exact`` - the share of blocks matching the
+    release's line count *exactly* - which on a one-block page is binary.  See
+    ``corpus_metrics.line_closeness`` for why an exact-match fraction is the
+    wrong shape for a component of a geometric mean.
+    """
+    return None if line_closeness is None else _clamp01(line_closeness)
 
 
 def c_textiou(text_iou_mean: float | None) -> float | None:
@@ -319,11 +335,22 @@ def distribution_md(pages: Sequence[Mapping[str, Any]]) -> str:
 # which is inset by the margin) and not `overflow` (measured against the balloon outline).
 # On that same defect `uncontained` fired on 10 pages, and every one of these five counters
 # was bit-identical across a base/restored control pair, so none of them can fire on noise.
+#
+# The last three are the REFERENCE-FREE self-checks of
+# `glasstranslate/render/selfcheck.py`: they compare the render only with the text it was
+# handed and the page it drew on, so unlike every other number here they also hold in real
+# use, on a page nobody has an English edition of.  They catch what a reader notices first
+# and no component of R can see - half a sentence lettered into a balloon, a line break that
+# ate its space ("BEINGAN ADULTISSO CONFUSING!"), and Japanese ink still readable inside a
+# balloon we lettered over.
 _HARD_INVARIANTS = (
     ("overflow", "overflow_px"),
     ("leftover", "leftover_px"),
     ("uncontained blocks", "uncontained"),
     ("panel-border collisions", "collisions"),
+    ("blocks missing text", "fragments"),
+    ("blocks broken mid-word", "bad_breaks"),
+    ("source ink left in a balloon", "bubble_ink_px"),
 )
 
 

@@ -578,9 +578,11 @@ def _rebalance(lines: List[str], budgets: Sequence[float], size: float, measure:
     # available the DP says so (None, or the wrong count) and the plain
     # balanced block stands, exactly as before.
     beats = sorted(set(forced) | set(sentence_breaks(tokens)))
-    starts = balanced_breaks(len(tokens), n, caps, width, tgts, beats)
+    # ...and among the breaks that remain, prefer the ones a letterer prefers.
+    sense = sense_costs(tokens)
+    starts = balanced_breaks(len(tokens), n, caps, width, tgts, beats, sense)
     if starts is None or len(starts) != n + 1:
-        starts = balanced_breaks(len(tokens), n, caps, width, tgts, forced)
+        starts = balanced_breaks(len(tokens), n, caps, width, tgts, forced, sense)
     if starts is None or len(starts) != n + 1:
         return lines
     return [" ".join(tokens[starts[i] : starts[i + 1]]) for i in range(n)]
@@ -896,6 +898,69 @@ def sentence_breaks(tokens: Sequence[str]) -> List[int]:
     return out
 
 
+# A phrase ends at one of these too, but weakly: a letterer will break there when the
+# shapes are close, and will not distort the block to do it (that is what a sentence end
+# gets, through `forced`).
+_PHRASE_END = ",;:—–"
+# Never stranded at the end of a line, away from the noun they introduce.
+_ARTICLES = frozenset({"a", "an", "the"})
+#
+# THE CONJUNCTION/PREPOSITION RULE IS NOT HERE, AND THAT IS DELIBERATE.
+# The obvious companion rule - reward breaking *before* a conjunction or preposition, and
+# penalise stranding one at a line end - was built, measured against the release's own
+# lettering on every block it moved, and **refuted**: 2 blocks better, 3 worse, 1 unchanged.
+# VIZ is perfectly willing to strand a short function word when it balances the block
+# better, and does so in `SPEECH OR / JUGON?`, `SPECIFICALLY FOR / ENTERTAINMENT` and
+# `ON THE DAY IN / QUESTION.` - all three of which this rule "corrected" away from the
+# release.  See the perf note, tag `sense`.  What survives below are the two rules the
+# release does not contradict.
+# One unit of sense cost, as a fraction of the line's target width squared.  The balance
+# term is (target - width)**2, so 0.04 means a preferred break wins only when it costs the
+# rectangle less than 20 % of the target in width - i.e. when the shapes really are
+# comparable, which is the letterer's own rule.  It is deliberately far below the 0.40 a
+# previous attempt needed to flip a SENTENCE break: sentence ends are handled by `forced`
+# before this is consulted, so all this has to do is order the breaks that remain.
+_SENSE_SPAN = 0.04
+
+
+def sense_costs(tokens: Sequence[str]) -> List[float]:
+    """Cost of ending a line before each token, in units of ``_SENSE_SPAN``.
+
+    Negative is a break a letterer prefers, positive one they avoid.  Index ``j``
+    is the cost of the break that puts ``tokens[j]`` at the start of the next
+    line; index 0 is never a break and is always 0.
+
+    Two rules, both of which the release's own lettering supports (or at least
+    never contradicts on the 50-page sample):
+
+    * **after a phrase end** (``,`` ``;`` ``:`` em dash) - a natural pause, so a
+      small reward;
+    * **after an article** - a penalty, because ``THE / GIRL`` separates a word
+      from the noun it introduces and no letterer sets that on purpose.
+
+    A third rule - reward breaking before a conjunction or preposition - was
+    built and **refuted by the release**; see the comment on :data:`_ARTICLES`.
+
+    A token is judged on its letters only, so quotation marks and brackets do
+    not hide the word inside them.
+    """
+    costs = [0.0] * (len(tokens) + 1)
+
+    def word(token: str) -> str:
+        return "".join(c for c in token if c.isalpha()).lower()
+
+    for j in range(1, len(tokens)):
+        before = tokens[j - 1]
+        cost = 0.0
+        stripped = before.rstrip(_SENTENCE_CLOSERS)
+        if stripped and stripped[-1] in _PHRASE_END:
+            cost -= 1.0
+        if word(before) in _ARTICLES:
+            cost += 2.0
+        costs[j] = cost * _SENSE_SPAN
+    return costs
+
+
 def _line_limits(count: int, forced: Sequence[int]) -> List[int]:
     """``limit[i]``: exclusive upper bound of the end of a line starting at
     word ``i`` so that no forced break (a line must end after word ``k`` for
@@ -947,6 +1012,7 @@ def balanced_breaks(
     width: WidthOf,
     targets: Optional[Sequence[float]] = None,
     forced: Sequence[int] = (),
+    sense: Optional[Sequence[float]] = None,
 ) -> Optional[List[int]]:
     """Break ``count`` words into at most ``n`` lines no wider than ``max_w``
     (one limit, or one per line), minimising the summed squared shortfall
@@ -954,7 +1020,15 @@ def balanced_breaks(
     default the line's limit): the letterer's "balanced" block.  ``forced``
     lists words after which a line must end.  Returns the list of line
     start indexes (plus the final ``count``), or None when a word alone is
-    wider than its line's limit."""
+    wider than its line's limit.
+
+    ``sense`` optionally carries one cost per break position (``sense[j]`` is
+    charged when a line ends just before word ``j``), in the units
+    :func:`sense_costs` produces: a *fraction of the line's target width
+    squared*, so it is comparable with the balance term on any page at any
+    size.  Negative is a preferred break.  It is deliberately small - the
+    rectangle term still decides the shape, and a sense break only wins when
+    the shapes are comparable."""
     if count <= 0:
         return None
     n = max(1, min(n, count))
@@ -986,6 +1060,10 @@ def balanced_breaks(
                     if rest == inf:
                         continue
                     c = (target - w) ** 2 + rest
+                    if sense is not None and j < len(sense):
+                        # Scaled by this line's own target, so one "unit" of sense means
+                        # the same thing on a wide caption and a narrow balloon.
+                        c += float(sense[j]) * target * target
                     if c < best_c:
                         best_c, best_j = c, j
             cost[k][i], nxt_break[k][i] = best_c, best_j

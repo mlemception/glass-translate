@@ -107,7 +107,7 @@ def test_to_components_maps_every_raw_key_onto_a_score_component() -> None:
     raw = {"containment_mean": 0.0, "erase_iou": 1.0, "art_kept": 1.0,
            "lpips_excess": 0.0, "centre_offset_em_mean": 0.0,
            "leftover_em2_mean": 0.0, "size_logratio_rms": 0.0,
-           "group_f1": 1.0, "line_exact": 1.0, "text_iou_mean": 1.0}
+           "group_f1": 1.0, "line_closeness": 1.0, "text_iou_mean": 1.0}
     components = CE.to_components(raw)
     assert set(components) == set(CS.COMPONENT_WEIGHTS)
     assert all(v == pytest.approx(1.0) for v in components.values())
@@ -118,7 +118,7 @@ def test_to_components_passes_none_through_so_the_weights_renormalise() -> None:
     raw = {"containment_mean": None, "erase_iou": 1.0, "art_kept": 1.0,
            "lpips_excess": None, "centre_offset_em_mean": None,
            "leftover_em2_mean": None, "size_logratio_rms": 0.0,
-           "group_f1": 1.0, "line_exact": 1.0, "text_iou_mean": 1.0}
+           "group_f1": 1.0, "line_closeness": 1.0, "text_iou_mean": 1.0}
     components = CE.to_components(raw)
     assert components["c_contain"] is None
     assert components["c_centre"] is None
