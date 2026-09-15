@@ -47,6 +47,7 @@ from .typeset import (
     memoize_measure,
     min_max_width,
     rect_spans,
+    sense_costs,
     sentence_breaks,
     span_widths,
     split_at,
@@ -567,7 +568,8 @@ def _oval_targets(n: int, width: float) -> List[float]:
 
 
 def _breaks(count: int, n: int, width: float, width_of, forced: Sequence[int],
-            beats: Sequence[int] = ()) -> List[int]:
+            beats: Sequence[int] = (),
+            sense: Optional[Sequence[float]] = None) -> List[int]:
     """Balanced line starts for ``n`` lines of at most ``width`` (mildly
     oval targets); one word per line if the DP has no solution (it always
     has one when ``width`` came from :func:`typeset.min_max_width`).
@@ -577,14 +579,19 @@ def _breaks(count: int, n: int, width: float, width_of, forced: Sequence[int],
     pieces, rather than trading sense against rectangle-ness.  When they do not
     fit the lines available the plain balanced block stands.  Only the final
     breaking passes them - :func:`_raggedness` scores candidate *shapes* and
-    stays on the plain balance, so which shape is chosen does not move."""
+    stays on the plain balance, so which shape is chosen does not move.
+
+    ``sense`` (:func:`typeset.sense_costs`) weights the breaks that remain once
+    the beats are placed - a small reward for breaking after a comma or before a
+    conjunction, a penalty for stranding an article.  It rides on the same final
+    pass, for the same reason."""
     targets = _oval_targets(n, width)
     if beats:
         at_beats = balanced_breaks(count, n, width + 0.01, width_of, targets,
-                                   sorted(set(forced) | set(beats)))
+                                   sorted(set(forced) | set(beats)), sense)
         if at_beats is not None and len(at_beats) == n + 1:
             return at_beats
-    starts = balanced_breaks(count, n, width + 0.01, width_of, targets, forced)
+    starts = balanced_breaks(count, n, width + 0.01, width_of, targets, forced, sense)
     return starts if starts is not None else list(range(count + 1))
 
 
@@ -606,7 +613,8 @@ def _flow_candidate(text: str, cand: _Candidate, measure: Measure, search: Rect)
     words = cand.words
     width_of = span_widths(words, cand.size, measure)
     count = len(words)
-    starts = _breaks(count, cand.n, cand.width, width_of, cand.forced, sentence_breaks(words))
+    starts = _breaks(count, cand.n, cand.width, width_of, cand.forced,
+                     sentence_breaks(words), sense_costs(words))
     lines = [" ".join(words[starts[i] : starts[i + 1]]) for i in range(len(starts) - 1)]
     margin = HALO_RATIO * cand.size + 1.0
     ink_top, _ = ink_offsets(text, cand.glyph_h)

@@ -424,3 +424,66 @@ def test_zone_split_favours_the_block_against_the_border():
     assert blocked(b, a_src.x2 + 2)  # ...but not into A's source
     assert blocked(a, a_src.x2 + 3) and not blocked(a, a_src.x2 - 5)  # A stops at its own source edge
     assert blocked(b, 296) and not blocked(b, 280)  # the border line and its margin stay off limits
+
+
+def test_sense_costs_reward_a_phrase_end_and_punish_a_stranded_article() -> None:
+    """The two rules the release's own lettering supports."""
+    T = importlib.import_module("glasstranslate.render.typeset")
+    tokens = ["IS", "USED,", "WHICH", "HAS", "THE", "BODY."]
+    costs = T.sense_costs(tokens)
+    assert len(costs) == len(tokens) + 1
+    assert costs[0] == 0.0                     # index 0 is never a break
+    assert costs[2] < 0.0                      # breaking after "USED," is rewarded
+    assert costs[5] > 0.0                      # breaking after "THE" is punished
+    assert costs[3] == 0.0 and costs[4] == 0.0  # everything else is neutral
+    # A closing quote must not hide the punctuation or the word behind it.
+    assert T.sense_costs(["USED,\u201d", "WHICH"])[1] < 0.0
+    assert T.sense_costs(["\u201cTHE", "BODY."])[1] > 0.0
+
+
+def test_sense_costs_leave_conjunctions_and_prepositions_alone() -> None:
+    """Rewarding a break before a conjunction was built and REFUTED by the release:
+    VIZ sets `SPEECH OR / JUGON?`, `SPECIFICALLY FOR / ENTERTAINMENT` and
+    `ON THE DAY IN / QUESTION.`, stranding the function word on purpose.  Measured
+    over every block the rule moved: 2 better, 3 worse, 1 unchanged."""
+    T = importlib.import_module("glasstranslate.render.typeset")
+    for pair in (["SPEECH", "OR"], ["SPECIFICALLY", "FOR"], ["DAY", "IN"],
+                 ["SHOCK", "AND"], ["GOING", "TO"]):
+        assert T.sense_costs(pair)[1] == 0.0, pair
+
+
+def test_balanced_breaks_moves_a_break_to_the_phrase_end_when_shapes_are_close() -> None:
+    """The v05_p163_4c312d case, which the release sets
+    `IS USED, WHICH / HAS A HARSH / EFFECT ON / THE BODY.`  Without the sense costs the
+    DP puts the break a word earlier; with them it lands on the comma, and the block
+    matches the release line for line."""
+    T = importlib.import_module("glasstranslate.render.typeset")
+    tokens = ["IS", "USED,", "WHICH", "HAS", "A", "HARSH"]
+    widths = {"IS": 4.0, "USED,": 5.0, "WHICH": 5.0, "HAS": 3.0, "A": 1.0, "HARSH": 5.0}
+
+    def width(i: int, j: int) -> float:
+        return sum(widths[t] for t in tokens[i:j]) + (j - i - 1)
+
+    # Two shapes, 12 apart in balance cost: 10|17 breaking on the comma against 16|11
+    # breaking a word later.  One unit of sense is 0.04 * 20**2 = 16, so the comma wins -
+    # and would not if the shapes were further apart (the next test pins that).
+    plain = T.balanced_breaks(len(tokens), 2, 20.0, width)
+    withs = T.balanced_breaks(len(tokens), 2, 20.0, width, None, (), T.sense_costs(tokens))
+    assert plain is not None and withs is not None
+    assert plain[1] == 3 and tokens[plain[1] - 1] == "WHICH"   # mid-phrase, before
+    assert withs[1] == 2 and tokens[withs[1] - 1] == "USED,"   # on the comma, after
+
+
+def test_sense_costs_never_override_a_shape_that_is_much_better() -> None:
+    """`_SENSE_SPAN` is small on purpose: the rectangle term still decides.  A break at
+    a phrase end that would leave one line nearly empty must still lose."""
+    T = importlib.import_module("glasstranslate.render.typeset")
+    tokens = ["A,", "BBBBBBBBBB", "CCCCCCCCCC"]
+    widths = {"A,": 1.0, "BBBBBBBBBB": 10.0, "CCCCCCCCCC": 10.0}
+
+    def width(i: int, j: int) -> float:
+        return sum(widths[t] for t in tokens[i:j]) + (j - i - 1)
+
+    starts = T.balanced_breaks(len(tokens), 2, 21.0, width, None, (), T.sense_costs(tokens))
+    # Breaking after "A," is rewarded but would set a 1-wide line against a 21-wide one.
+    assert starts is not None and starts[1] == 2
