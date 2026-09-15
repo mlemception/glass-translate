@@ -116,7 +116,13 @@ Jump straight to:
 
 Also in this repo: [module contracts](docs/ARCHITECTURE.md) ·
 [control-window design](docs/GLASS_DESIGN.md) · [model licences](renderer/MODELS.md) ·
-[benchmarks](docs/perf/)
+[benchmarks](docs/perf/) ·
+[typesetting corpus harness](docs/plans/2026-09-15-typeset-corpus.md)
+
+The corpus harness measures how close the typesetter gets to a professional English release,
+page by page, and fails when a change makes it worse. It needs a local library of matched
+Japanese and English volumes that is **not** part of this repository and never will be — see the
+plan above for how it pairs pages, what it can and cannot measure, and the commands to run it.
 
 ---
 
