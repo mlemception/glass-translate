@@ -1,6 +1,7 @@
 """Synthetic tests for the glyph eraser (``glasstranslate.render.erase``)."""
 from __future__ import annotations
 
+import inspect
 import cv2
 import numpy as np
 import pytest
@@ -418,3 +419,42 @@ def test_overlapping_patches_do_not_repaint_each_others_glyphs(monkeypatch):
     raw = [_block(a, 24.0), _block(b, 24.0)]
     erase.apply(img, raw)
     assert not np.array_equal(_compose(img, raw), _compose(img, raw[::-1]))
+
+
+def test_detector_glyph_stops_scaling_past_a_normal_page_and_is_inert_below_it():
+    """`HOUGH_MIN_LEN * glyph` asked the ARTWORK for a straight run proportional to the
+    LETTERING.  Measured over the 50-page corpus sample, a page's straight art lines are
+    the same length whatever its lettering scale (p50 14-24 px, p75 23-47 px), while the
+    requirement ranged from 24 px on a page lettered at 33 px to 193 px on one lettered at
+    241 px - where only **0.2 %** of that page's art lines could supply one, against 46 %
+    on the normally lettered page.  Art protection was switched off on exactly the pages
+    whose erase reach is largest.
+
+    `erase.detector_glyph` caps the two detector thresholds and nothing else.
+    """
+    # Inert on a normally lettered page: those renders must be bit-identical.
+    for glyph in (20.0, 33.0, 37.0, erase.HOUGH_GLYPH_MAX):
+        assert erase.detector_glyph(glyph) == glyph
+
+    # ...and capped on the outliers, which is the whole point.
+    assert erase.detector_glyph(241.4) == erase.HOUGH_GLYPH_MAX
+    assert erase.detector_glyph(134.7) == erase.HOUGH_GLYPH_MAX
+
+    # The requirement it produces has to be reachable by real artwork: the sample's art
+    # lines have a p75 of 23-47 px, and 193 px is not a line any page could draw.
+    assert erase.HOUGH_MIN_LEN * erase.detector_glyph(241.4) <= 47.0
+    assert erase.HOUGH_MIN_LEN * 241.4 > 150.0        # what it used to demand
+
+    # Capping can only KEEP more art: both thresholds are minimums a line must exceed.
+    for glyph in (60.0, 120.0, 241.4):
+        assert erase.HOUGH_MIN_LEN * erase.detector_glyph(glyph) <= erase.HOUGH_MIN_LEN * glyph
+        assert erase.HOUGH_OUTSIDE * erase.detector_glyph(glyph) <= erase.HOUGH_OUTSIDE * glyph
+
+
+def test_only_the_detector_is_capped_not_the_reach_through_the_text():
+    """`HOUGH_EXTEND` is about the TEXT - how far a kept line is carried through the zone -
+    so it must keep the block's own glyph.  Capping it would shorten the rescue exactly
+    where the zone is widest."""
+    src = inspect.getsource(erase._art_lines)
+    assert "ext = HOUGH_EXTEND * g" in src, "the extrapolation reach must not be capped"
+    assert "HOUGH_MIN_LEN * gd" in src and "HOUGH_OUTSIDE * gd" in src
