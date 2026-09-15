@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 
+import cv2
 import numpy as np
 import pytest
 
@@ -170,3 +171,52 @@ def test_measure_style_rotated_vertical_segment():
     assert style.vertical is True
     assert style.angle_deg == pytest.approx(10.0, abs=0.5)
     assert style.text_height_px == pytest.approx(120.0, abs=1e-3)
+
+
+def antialiased_text_image(bg: tuple[int, int, int], ink: tuple[int, int, int],
+                           *, thickness: int = 1) -> np.ndarray:
+    """Fine strokes drawn with ``cv2.LINE_AA``, so most ink pixels are fringe.
+
+    This is what small CJK lettering looks like to ``extract_colors``: the
+    solid centres of the strokes are outnumbered by part-ink, part-paper edge
+    pixels, and the median of the foreground cluster is a blend nobody
+    printed.
+    """
+    img = np.full((40, 120, 3), bg[::-1], np.uint8)  # BGR
+    for k in range(6):
+        x = 12 + 18 * k
+        cv2.line(img, (x, 8), (x + 10, 31), ink[::-1], thickness, cv2.LINE_AA)
+        cv2.line(img, (x + 10, 8), (x, 31), ink[::-1], thickness, cv2.LINE_AA)
+    return img
+
+
+def test_antialiased_black_text_is_read_as_black_not_grey() -> None:
+    """The ink colour is the ink, not the average of the ink and the paper.
+
+    A guard, not a regression: synthetic anti-aliased strokes already read as
+    black before ``_ink_core`` existed (luma 54 at the thinnest stroke that
+    draws).  Reproducing the real failure takes a real page - a crop there
+    carries furigana, neighbouring columns, screentone and the balloon wall,
+    and the two-way split lands differently.  The evidence for that is in
+    docs/perf/2026-09-15-typeset-corpus.md; this pins the property.
+    """
+    img = antialiased_text_image((255, 255, 255), (0, 0, 0))
+    fg, bg = extract_colors(img, quad_from_box(5, 4, 110, 32))
+    assert max(bg) > 200, f"paper misread as {bg}"
+    # Anime Ace is lettered in black; anything above the layout layer's
+    # _FG_SNAP_LUMA = 90 floor is drawn as visible grey on the page.
+    luma = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
+    assert luma < 90, f"black lettering read as grey {fg} (luma {luma:.0f})"
+
+
+def test_antialiased_white_on_black_is_read_as_white_not_grey() -> None:
+    """The same, the other way up: inverted balloons and SFX on black.
+
+    This direction is what stops ``_ink_core`` being written as "take the
+    darkest quarter": white-on-black lettering has to get whiter, not darker.
+    """
+    img = antialiased_text_image((0, 0, 0), (255, 255, 255))
+    fg, bg = extract_colors(img, quad_from_box(5, 4, 110, 32))
+    assert min(bg) < 60, f"dark paper misread as {bg}"
+    luma = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
+    assert luma > 165, f"white lettering read as grey {fg} (luma {luma:.0f})"

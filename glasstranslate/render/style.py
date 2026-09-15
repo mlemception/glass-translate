@@ -29,6 +29,9 @@ _WHITE: RGB = (255, 255, 255)
 
 # Upper bound on the number of pixels handed to k-means.
 _KMEANS_MAX_SAMPLES = 4000
+# How much of the foreground cluster, measured from the end furthest from the
+# paper, is the ink rather than its anti-aliased fringe.  See :func:`_ink_core`.
+_INK_CORE_PERCENTILE = 25.0
 # A quad whose p0->p3 edge is more than this many times longer than its p0->p1
 # edge is treated as a vertical (top-to-bottom) text column.
 _VERTICAL_ASPECT = 1.5
@@ -152,8 +155,40 @@ def extract_colors(img_bgr: np.ndarray, quad: np.ndarray, pad: int = 2) -> Tuple
     bg = _to_rgb_tuple(np.median(bg_members, axis=0) if len(bg_members) else centers[bg_label])
     if len(fg_members) == 0:
         return _contrast_for(bg), bg
-    fg = _to_rgb_tuple(np.median(fg_members, axis=0))
+    fg = _to_rgb_tuple(np.median(_ink_core(fg_members, bg), axis=0))
     return fg, bg
+
+
+def _ink_core(fg_members: np.ndarray, bg: RGB) -> np.ndarray:
+    """The part of the foreground cluster that is the ink itself.
+
+    A glyph's edge pixels are part ink and part paper, and the smaller the
+    type the more of them there are; on fine CJK lettering they outnumber the
+    solid centres, so the *median* of the foreground cluster is a blend, not a
+    colour anyone printed.  Over the corpus that put 47 of 316 blocks at a
+    foreground luma of 90 - 126 - grey lettering where the page is printed in
+    black, and just the wrong side of the ``_FG_SNAP_LUMA`` floor that exists
+    to catch exactly this.
+
+    Anti-aliasing only ever pulls a pixel *toward* the paper and never past
+    it, so the ink's own colour is the end of the distribution furthest from
+    the paper.  Taking the quarter of the cluster that lies that way leaves
+    the solid centres of the strokes and drops the fringe.  Flat synthetic
+    text is unaffected: every member has the same colour, so any quarter of it
+    is that colour.
+    """
+    fg_luma = _luma_of(fg_members)
+    if float(np.median(fg_luma)) < float(_luma_of(np.asarray(bg, np.float32))):
+        keep = fg_luma <= np.percentile(fg_luma, _INK_CORE_PERCENTILE)
+    else:
+        keep = fg_luma >= np.percentile(fg_luma, 100.0 - _INK_CORE_PERCENTILE)
+    core = fg_members[keep]
+    return core if len(core) else fg_members
+
+
+def _luma_of(rgb: np.ndarray) -> np.ndarray:
+    """Rec. 601 luma of an RGB array (``..., 3``)."""
+    return rgb[..., 0] * 0.299 + rgb[..., 1] * 0.587 + rgb[..., 2] * 0.114
 
 
 def measure_style(img_bgr: np.ndarray, segment: Segment) -> SegmentStyle:
