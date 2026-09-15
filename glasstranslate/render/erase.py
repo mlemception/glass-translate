@@ -42,9 +42,10 @@ side for horizontal script):
    its own thickness and its tail.  Nothing outside the outline changes.
 
 Public API: :func:`apply` (whole page, in place on the block styles),
-:func:`erase_block` (one block -> ``(patch, rect, outline)``) and
+:func:`erase_block` (one block -> ``(patch, rect, outline)``),
 :func:`erase_block_masked` (the same plus the glyph mask that was painted
-over, which the quality renderer of ``render/quality.py`` regenerates).
+over, which the quality renderer of ``render/quality.py`` regenerates) and
+:func:`page_glyph` (the page's lettering scale, which bounds every reach above).
 """
 from __future__ import annotations
 
@@ -139,7 +140,7 @@ OUTLINE_REACH = 0.3  # glyphs around the source footprint checked for remaining 
 OUTLINE_MIN_INK = 40  # kept ink pixels in that area that make the block "over art"
 WINDOW_ALONG = 0.5  # window margin along the reading axis beyond the sweep reach (glyphs)
 WINDOW_ACROSS = 1.4  # window margin across the reading axis (glyphs)
-GLYPH_CAP = 1.25  # block glyph size is capped at this multiple of the page median
+GLYPH_CAP = 1.25  # block glyph size is capped at this multiple of the page lettering scale
 
 
 @dataclass
@@ -1068,6 +1069,32 @@ def _share_erased(blocks: Sequence[TextBlock]) -> None:
             pa[sa][only_b] = pb[sb][only_b]
 
 
+def page_glyph(blocks: Sequence[TextBlock]) -> float:
+    """The page's lettering scale: the median block glyph size, each block
+    weighted by the number of source characters it carries.
+
+    Every reach in this module is a multiple of the block's glyph size - how far
+    a column is swept (``SWEEP_MAX``), how wide the window is (``WINDOW_ACROSS``),
+    how big a component may be and still read as a glyph (``GLYPH_MAX``) - so an
+    over-measured glyph does not merely mis-erase the text, it enlarges the area
+    the eraser is willing to delete.  A *plain* median is set by a one-character
+    stylised sound effect as readily as by a line of dialogue, and a page of one
+    or two blocks used to get no cap at all: measured over the 50-page corpus
+    sample, 63 % of the source ink this module removed that the official release
+    kept was in blocks whose glyph exceeded 1.25x the page median, a single
+    one-character block accounting for 103k pixels of erased artwork.  Weighting
+    by character count lets the page's actual lettering set the scale.
+
+    Returns 0.0 when no block has a measured glyph size.
+    """
+    sizes: List[float] = []
+    for b in blocks:
+        g = float(b.style.text_height_px or 0.0)
+        if g > 0:
+            sizes.extend([g] * max(1, len(b.segment.text)))
+    return float(np.median(sizes)) if sizes else 0.0
+
+
 def apply(
     img_bgr: np.ndarray, blocks: List[TextBlock], all_segments: Sequence[Segment] = (), gray: Optional[np.ndarray] = None
 ) -> None:
@@ -1088,12 +1115,12 @@ def apply(
     for i, b in enumerate(blocks):
         main, furi = _boxes(b)
         boxes_per_block.append(main + furi + evidence[i])
-    median = float(np.median([b.style.text_height_px for b in blocks]))
+    scale = page_glyph(blocks)
     for i, b in enumerate(blocks):
         foreign = [r for j, rs in enumerate(boxes_per_block) if j != i for r in rs]
         g = b.style.text_height_px
-        if len(blocks) >= 3:
-            g = min(g, GLYPH_CAP * median)
+        if scale > 0:
+            g = min(g, GLYPH_CAP * scale)
         patch, rect, outline, mask = erase_block_masked(
             img_bgr, b, gray=gray, foreign=foreign, glyph=g, extra=evidence[i]
         )

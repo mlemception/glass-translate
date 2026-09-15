@@ -17,8 +17,9 @@ def _quad(r: Rect) -> np.ndarray:
     return np.array([[r.x, r.y], [r.x2, r.y], [r.x2, r.y2], [r.x, r.y2]], np.float32)
 
 
-def _block(box: Rect, glyph: float, *, bubble: Rect | None = None, furigana: list[Rect] = ()) -> TextBlock:
-    seg = Segment("テスト", _quad(box), 0.9)
+def _block(box: Rect, glyph: float, *, bubble: Rect | None = None, furigana: list[Rect] = (),
+           text: str = "テスト") -> TextBlock:
+    seg = Segment(text, _quad(box), 0.9)
     style = SegmentStyle(fg=(0, 0, 0), bg=(PAPER, PAPER, PAPER), angle_deg=0.0, text_height_px=glyph, vertical=True,
                          in_bubble=bubble is not None)
     furi = [Segment("ふ", _quad(f), 0.9) for f in furigana]
@@ -302,6 +303,56 @@ def _redrawn(img: np.ndarray, block: TextBlock) -> np.ndarray:
 
 def _ink(page: np.ndarray, rect: Rect) -> int:
     return int((_gray(page)[rect.y : rect.y2, rect.x : rect.x2] < PAPER - 20).sum())
+
+
+def test_page_lettering_scale_bounds_a_giant_stylised_block():
+    """One stylised character must not set the page's erase scale.
+
+    Every reach in the eraser is a multiple of the block's glyph size, so a
+    block measured many times the page's lettering sweeps - and deletes -
+    artwork hundreds of pixels from the text.  ``GLYPH_CAP`` exists for this,
+    but it was skipped entirely on pages of fewer than three blocks and took a
+    *plain* median, which a one-character sound effect sets as readily as a line
+    of dialogue.  Both holes are on this page: two blocks, and a plain median of
+    (24, 180) that leaves the sound effect uncapped either way.
+    """
+    lettering, stylised = 24.0, 180.0
+    capped = erase.GLYPH_CAP * lettering
+    img = _page(760, 620)
+    dialogue = _draw_column(img, 60, 60, 6, int(lettering))
+    sfx = _draw_column(img, 300, 120, 1, int(stylised))
+    # An art blob on the sound effect's column axis, below its foot and big enough to
+    # extend a column.  The geometry is *derived* from the tunables, not hard-coded:
+    # a test that hard-codes it silently stops discriminating when one of them moves.
+    gap = round(0.72 * erase.SWEEP_GAP * stylised)
+    blob = Rect(345, sfx.y2 + gap, 90, 90)
+    assert gap < erase.SWEEP_GAP * stylised  # uncapped: the sweep bridges the gap...
+    assert blob.y2 - sfx.y2 < erase.SWEEP_MAX * stylised  # ...and reaches that far...
+    assert erase.SWEEP_BODY * stylised <= blob.w <= erase.GLYPH_MAX * stylised  # ...over a glyph-sized body
+    assert gap > erase.SWEEP_GAP * capped  # capped: the gap is out of reach...
+    assert blob.w > erase.GLYPH_MAX * capped  # ...and the blob is not glyph-sized either
+    cv2.rectangle(img, (blob.x, blob.y), (blob.x2 - 1, blob.y2 - 1), (0, 0, 0), -1)
+    before = _ink(img, blob)
+    assert before == blob.w * blob.h
+
+    blocks = [_block(dialogue, lettering, text="ダイアローグです"), _block(sfx, stylised, text="ド")]
+    # The page's lettering scale is the dialogue's, not the median of the two.
+    assert erase.page_glyph(blocks) == pytest.approx(lettering)
+
+    erase.apply(img, blocks)
+    page = _compose(img, blocks)
+    assert _ink(page, blob) == before  # the art blob is untouched
+    assert _ink(page, sfx) == 0  # ...and the sound effect is still erased
+    assert _ink(page, dialogue) == 0
+
+
+def test_page_glyph_ignores_blocks_with_no_measured_glyph():
+    box = Rect(180, 100, 30, 138)
+    assert erase.page_glyph([]) == 0.0
+    # A block with no measured glyph does not vote...
+    assert erase.page_glyph([_block(box, 30.0), _block(box, 0.0, text="x")]) == pytest.approx(30.0)
+    # ...and a block with no text still votes once, so it cannot vanish from the scale.
+    assert erase.page_glyph([_block(box, 50.0, text="")]) == pytest.approx(50.0)
 
 
 def test_a_column_the_detector_never_reported_is_erased_inside_the_balloon(monkeypatch):
