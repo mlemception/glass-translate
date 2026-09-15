@@ -1,6 +1,6 @@
 """Tests for ``demo/corpus_metrics.py`` on synthetic inputs: the dilated text
 IoU (and why it is dilated), the grouping F1 over assigned / unassigned English
-lines, the resolution-free leftover, the symmetric size log-ratio, the exact
+lines, the resolution-free leftover, the symmetric size log-ratio, the graded
 line count, the anti-degenerate answered fraction, the LPIPS floor windows and
 excess, the weak-reference guard, and the ``page_components`` / ``page_extras``
 glue that feeds ``demo/corpus_score.py``.  No corpus page, no OCR, no GPU, no
@@ -70,9 +70,12 @@ def test_text_iou_is_none_when_either_side_has_no_text() -> None:
 
 
 # --------------------------------------------------------------- grouping
-def _line(x: int, y: int, w: int = 40, h: int = 16) -> SimpleNamespace:
-    """A stand-in for an English ``Segment`` with the bbox the metric reads."""
-    return SimpleNamespace(bbox=Rect(x, y, w, h))
+def _line(x: int, y: int, w: int = 40, h: int = 16, text: str = "WORDS",
+          confidence: float = 1.0) -> SimpleNamespace:
+    """A stand-in for an English ``Segment``: the bbox the metric reads, plus the
+    text and confidence ``trustworthy_english`` reads.  A real reference segment
+    always carries all three (``typeset_reference._seg_record``)."""
+    return SimpleNamespace(bbox=Rect(x, y, w, h), text=text, confidence=confidence)
 
 
 def test_group_f1_is_one_when_every_balloon_holds_exactly_one_block() -> None:
@@ -138,12 +141,63 @@ def test_size_logratio_rms_is_zero_when_perfect_and_symmetric_otherwise() -> Non
     assert CM.size_logratio_rms([None, 0.0]) is None
 
 
-def test_line_exact_counts_only_the_compared_blocks() -> None:
+def test_line_closeness_counts_only_the_compared_blocks() -> None:
     rows = [{"lines": 2, "lines_ref": 2}, {"lines": 3, "lines_ref": 2}, {"lines": 1, "lines_ref": None}]
-    assert CM.line_exact(rows) == pytest.approx(0.5)
-    assert CM.line_exact(rows + [{"lines": 9, "lines_ref": 2, "untranslated": True}]) == pytest.approx(0.5)
-    assert CM.line_exact([{"lines": 1, "lines_ref": None}]) is None
-    assert CM.line_exact([]) is None
+    # 1.0 for the exact block, 1 - 1/2 for the one line over: mean 0.75.
+    assert CM.line_closeness(rows) == pytest.approx(0.75)
+    assert CM.line_closeness(rows + [{"lines": 9, "lines_ref": 2, "untranslated": True}]) == pytest.approx(0.75)
+    assert CM.line_closeness([{"lines": 1, "lines_ref": None}]) is None
+    assert CM.line_closeness([]) is None
+
+
+def test_line_closeness_grades_a_near_miss_instead_of_zeroing_the_page() -> None:
+    """The v24_p065_3745d5 case: two lines where the release set three.
+
+    Under the old exact-match ``line_exact`` this returned 0.0, and because R is a
+    geometric mean that took an otherwise near-perfect page to R = 0.00.  Graded,
+    one line out of three costs a third.  An exact match still scores 1.0, and a
+    genuinely wrong shape still reaches a true 0.
+    """
+    assert CM.line_closeness([{"lines": 2, "lines_ref": 3}]) == pytest.approx(2.0 / 3.0)
+    assert CM.line_closeness([{"lines": 3, "lines_ref": 3}]) == pytest.approx(1.0)
+    assert CM.line_closeness([{"lines": 1, "lines_ref": 5}]) == pytest.approx(0.2)
+    # At or past twice the reference count there is no credit left.
+    assert CM.line_closeness([{"lines": 6, "lines_ref": 3}]) == pytest.approx(0.0)
+    assert CM.line_closeness([{"lines": 9, "lines_ref": 3}]) == pytest.approx(0.0)
+    # A reference count of 0 has no scale to divide by, so it is scored by equality.
+    assert CM.line_closeness([{"lines": 0, "lines_ref": 0}]) == pytest.approx(1.0)
+    assert CM.line_closeness([{"lines": 2, "lines_ref": 0}]) == pytest.approx(0.0)
+
+
+def test_trustworthy_english_drops_the_noise_and_keeps_the_lettering() -> None:
+    """Three definitional rules, measured on the 50-page sample as 28 % of the pile."""
+    kept = {"text": "WITHOUT ME.", "bbox": [0, 0, 10, 10], "confidence": 1.0}
+    short = {"text": "P!", "bbox": [0, 0, 10, 10], "confidence": 0.95}
+    segments = [
+        kept,
+        short,
+        {"text": "00000", "bbox": [0, 0, 10, 10], "confidence": 0.9},    # screentone, no letter
+        {"text": "8889", "bbox": [0, 0, 10, 10], "confidence": 0.69},    # ditto
+        {"text": "会", "bbox": [0, 0, 10, 10], "confidence": 0.95},  # CJK read off the English page
+        {"text": "uそ!", "bbox": [0, 0, 10, 10], "confidence": 0.9},  # ditto, mixed
+        {"text": "A11T7", "bbox": [0, 0, 10, 10], "confidence": 0.43},   # OCR says it does not know
+    ]
+    assert CM.trustworthy_english(segments) == [kept, short]
+    # The bar is exactly the one typeset_reference.derive already uses for a block.
+    assert CM.ENGLISH_MIN_CONFIDENCE == 0.6
+    edge = {"text": "OK", "bbox": [0, 0, 10, 10], "confidence": CM.ENGLISH_MIN_CONFIDENCE}
+    assert CM.trustworthy_english([edge]) == [edge]
+    assert CM.trustworthy_english([]) == []
+
+
+def test_noise_clusters_no_longer_count_as_balloons_we_missed() -> None:
+    """The end-to-end point of the filter: screentone read as ``00000`` used to be a
+    missed balloon in ``group_f1``'s FN term and in ``answered``'s denominator."""
+    noise = [{"text": "00000", "bbox": [500, 500, 40, 12], "confidence": 0.9},
+             {"text": "省", "bbox": [700, 700, 30, 30], "confidence": 0.49}]
+    assert CM.trustworthy_english(noise) == []
+    assert CM._cluster_count(noise, 20.0) == 2
+    assert CM._cluster_count(CM.trustworthy_english(noise), 20.0) == 0
 
 
 # --------------------------------------------------------------- answered
@@ -216,7 +270,7 @@ def test_page_components_always_carries_every_key() -> None:
     assert set(CM.COMPONENT_KEYS) <= set(out) and "answered" in out
     assert out["leftover_em2_mean"] == pytest.approx(1.0) and out["lpips_excess"] == pytest.approx(0.1)
     assert out["group_f1"] == pytest.approx(0.75) and out["text_iou_mean"] == pytest.approx(0.7)
-    assert out["line_exact"] == pytest.approx(1.0) and out["size_logratio_rms"] == pytest.approx(0.0)
+    assert out["line_closeness"] == pytest.approx(1.0) and out["size_logratio_rms"] == pytest.approx(0.0)
     assert out["erase_iou"] == pytest.approx(0.8) and out["art_kept"] == pytest.approx(0.9)
 
 
@@ -251,7 +305,7 @@ def test_untranslated_blocks_stay_out_of_the_page_components() -> None:
              "untranslated": True}]
     out = CM.page_components(_scored(rows, {"erase_iou": 0.8, "art_kept": 0.9}), {"em_px": [10.0, 10.0]})
     assert out["leftover_em2_mean"] == pytest.approx(1.0)
-    assert out["size_logratio_rms"] == pytest.approx(0.0) and out["line_exact"] == pytest.approx(1.0)
+    assert out["size_logratio_rms"] == pytest.approx(0.0) and out["line_closeness"] == pytest.approx(1.0)
 
 
 # --------------------------------------------------------------- page extras
@@ -315,7 +369,7 @@ def test_stylish_onomatopoeia_is_excluded_not_penalised(tmp_path: Path) -> None:
 def test_the_sfx_exclusion_survives_into_page_components(tmp_path: Path) -> None:
     """page_components is what feeds the score, so the exclusion has to reach it.
 
-    page_components recomputes line_exact / size_logratio_rms / leftover_em2_mean from
+    page_components recomputes line_closeness / size_logratio_rms / leftover_em2_mean from
     scored["blocks"], where it cannot tell an SFX block from a real one - and an SFX
     block's `lines_ref` is 0, not None, so it really would be compared.  The values
     page_extras computed over the in-scope blocks must win.
@@ -326,7 +380,7 @@ def test_the_sfx_exclusion_survives_into_page_components(tmp_path: Path) -> None
                             ja_path=ja_path)
     assert extras["sfx_excluded"] == 1
     components = CM.page_components(scored, extras)
-    assert components["line_exact"] == extras["line_exact"]
+    assert components["line_closeness"] == extras["line_closeness"]
     assert components["size_logratio_rms"] == extras["size_logratio_rms"]
     assert components["leftover_em2_mean"] == extras["leftover_em2_mean"]
 
@@ -335,7 +389,7 @@ def test_page_components_without_extras_still_computes_locally(tmp_path: Path) -
     """The local computation is the fallback for a caller that has no extras."""
     scored, _truth, _render_dir, _ja_path = _write_page(tmp_path, "bubble")
     components = CM.page_components(scored)
-    assert components["line_exact"] == pytest.approx(1.0)
+    assert components["line_closeness"] == pytest.approx(1.0)
     assert components["size_logratio_rms"] == pytest.approx(0.0)
 
 
@@ -371,7 +425,7 @@ def test_page_extras_reads_the_render_and_scores_the_page(tmp_path: Path) -> Non
     assert extras["group_f1"] == pytest.approx(1.0) and extras["group_tp"] == 1
     assert extras["text_iou_mean"] is not None and extras["text_iou_mean"] > 0.6
     assert extras["leftover_em2_mean"] == pytest.approx(100 / 400.0)
-    assert extras["line_exact"] == pytest.approx(1.0) and extras["size_logratio_rms"] == pytest.approx(0.0)
+    assert extras["line_closeness"] == pytest.approx(1.0) and extras["size_logratio_rms"] == pytest.approx(0.0)
     assert extras["answered"] == pytest.approx(1.0)
     components = CM.page_components(scored, extras)
     assert set(CM.COMPONENT_KEYS) <= set(components)
@@ -481,7 +535,7 @@ def test_component_keys_match_what_corpus_score_consumes() -> None:
         "c_leftover": CS.c_leftover(out["leftover_em2_mean"]),
         "c_size": CS.c_size(out["size_logratio_rms"]),
         "c_group": CS.c_group(out["group_f1"]),
-        "c_lines": CS.c_lines(out["line_exact"]),
+        "c_lines": CS.c_lines(out["line_closeness"]),
         "c_textiou": CS.c_textiou(out["text_iou_mean"]),
     }
     assert set(components) == set(CS.COMPONENT_WEIGHTS)

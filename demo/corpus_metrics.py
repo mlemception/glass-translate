@@ -15,7 +15,7 @@ this module adds is:
 * :func:`group_f1` - did we cut the page into the same *blocks*?  One lettered
   block per balloon, nothing lettered where the release left the art alone,
   nothing left unlettered;
-* :func:`leftover_em2`, :func:`size_logratio_rms`, :func:`line_exact` - the
+* :func:`leftover_em2`, :func:`size_logratio_rms`, :func:`line_closeness` - the
   resolution-free / symmetric / exact-match forms of numbers the per-page
   tables already carry per block;
 * :func:`answered_fraction` - the anti-degenerate gate: abstaining on the hard
@@ -57,6 +57,11 @@ REF_CAP_EM_MAX = 1.2
 WINDOW_SIZE = 256  # px: side of an LPIPS floor window
 WINDOW_COUNT = 6  # how many floor windows a page contributes at most
 ENGLISH_BOX_PAD = 2  # px the English OCR boxes grow before masking their ink (typeset_reference.ENGLISH_BOX_PAD)
+# Below this the reference OCR does not know what it read, so neither do we.  NOT a new
+# threshold: `typeset_reference.derive` already calls a block's reading uncertain at exactly
+# this bar (`min(s.confidence for s in lines) < 0.6`).  The unassigned pile was the one place
+# that bar was never applied, and it is the place it matters most - see `trustworthy_english`.
+ENGLISH_MIN_CONFIDENCE = 0.6
 
 # The keys :func:`page_components` always returns, in the order the score reads
 # them.  ``corpus_score`` maps them through its own ``c_*`` functions (erase_iou
@@ -70,7 +75,7 @@ COMPONENT_KEYS: Tuple[str, ...] = (
     "leftover_em2_mean",
     "size_logratio_rms",
     "group_f1",
-    "line_exact",
+    "line_closeness",
     "text_iou_mean",
 )
 # Only bubble blocks have an interior, so a page without one has no value here
@@ -83,7 +88,7 @@ BALLOON_ONLY_KEYS: Tuple[str, ...] = ("containment_mean", "centre_offset_em_mean
 # missed balloon produces - so dropping it on a weak reference deleted the penalty in
 # precisely the case it exists for.  A page with every block wrong in both directions
 # (tp=0, fp=1, fn=2) scored 35.96 because group_f1 had been removed.
-WEAK_REFERENCE_KEYS: Tuple[str, ...] = ("text_iou_mean", "line_exact")
+WEAK_REFERENCE_KEYS: Tuple[str, ...] = ("text_iou_mean", "line_closeness")
 
 
 # --------------------------------------------------------------- small helpers
@@ -266,23 +271,98 @@ def size_logratio_rms(cap_ratios: Iterable[Any]) -> Optional[float]:
     return math.sqrt(sum(value * value for value in logs) / len(logs)) if logs else None
 
 
-def line_exact(rows: Iterable[Mapping[str, Any]]) -> Optional[float]:
-    """Share of the compared blocks whose rendered ``lines`` equals the
-    reference's ``lines_ref`` (the rows ``typeset_metrics.score_lettering``
-    produces).  A block with no ``lines_ref`` was not compared; a block flagged
-    ``untranslated`` is left out, as in ``typeset_metrics.summarize``.  None when
-    nothing is comparable."""
-    compared = matched = 0
+def line_closeness(rows: Iterable[Mapping[str, Any]]) -> Optional[float]:
+    """How close our line counts are to the release's, averaged over the
+    compared blocks: ``max(0, 1 - |lines - lines_ref| / lines_ref)`` each.
+
+    This was ``line_exact``, the share of blocks matching the reference count
+    *exactly*, and that shape was wrong for a component of a **geometric** mean.
+    On a one-block page it is binary, and 0 is absorbing whatever the weight, so
+    a 0.06-weight component zeroed a page as thoroughly as the 0.20-weight one:
+    ``v24_p065_3745d5`` scored ``answered`` 1.000, ``c_contain`` 1.000,
+    ``c_erase`` 1.000, ``c_leftover`` 1.000, ``c_group`` 1.000, ``c_size``
+    0.975 - and **R = 0.00**, because it set two lines where the release set
+    three.  Looked at, that page is a competent, legible, correctly sized,
+    cleanly erased balloon with one craft gap.
+
+    Graded, one line out of three costs 0.33 instead of everything, while a
+    genuinely wrong shape still tends to 0 - setting one line where the release
+    set five scores 0.2, and anything at or past twice the reference count
+    scores a true 0.  Exactness is not thrown away: an exact match still scores
+    1.0, so a render that matches everywhere is unchanged.
+
+    A block with no ``lines_ref`` was not compared; a block flagged
+    ``untranslated`` is left out, as in ``typeset_metrics.summarize``.  A
+    reference count of 0 (an SFX block, which ``page_extras`` drops before it
+    gets here) is scored by equality, there being no scale to divide by.  None
+    when nothing is comparable."""
+    scores: List[float] = []
     for row in rows:
         if row.get("untranslated"):
             continue
-        reference = row.get("lines_ref")
+        reference = _number(row.get("lines_ref"))
         if reference is None:
             continue
-        compared += 1
-        if row.get("lines") == reference:
-            matched += 1
-    return matched / float(compared) if compared else None
+        ours = _number(row.get("lines"))
+        if ours is None:
+            scores.append(0.0)
+        elif reference <= 0.0:
+            scores.append(1.0 if ours == reference else 0.0)
+        else:
+            scores.append(max(0.0, 1.0 - abs(ours - reference) / reference))
+    return float(sum(scores) / len(scores)) if scores else None
+
+
+def _has_cjk(text: str) -> bool:
+    """True when ``text`` carries a CJK character (the ranges
+    ``glasstranslate.render.layout.has_cjk`` uses; duplicated rather than
+    imported because this module must not pull in the render stack)."""
+    return any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
+               or 0xFF00 <= ord(c) <= 0xFFEF for c in text)
+
+
+def trustworthy_english(segments: Sequence[Any]) -> List[Any]:
+    """The reference-OCR lines that are actually the release's English lettering.
+
+    ``unassigned_english`` drives two penalties - ``group_f1``'s FN term and,
+    multiplicatively, ``answered``'s denominator - both meaning "a balloon the
+    release lettered and we did not".  A line that is not English lettering at
+    all cannot mean that, and charging us for failing to letter it measures the
+    OCR rather than the typesetter.  Classifying all 57 unassigned clusters of
+    the 50-page sample by hand, **28 % were noise**: screentone read as
+    ``00000`` (seven such clusters on ``v01_p062`` alone), a CJK glyph read as
+    English, or a reading the OCR itself scored below 0.6.
+
+    Three rules, each definitional rather than tuned - a line is dropped when:
+
+    * it carries a CJK character - the *English* page's OCR returning Japanese
+      is a misread by construction, and Japanese the release chose to keep is
+      not English lettering we failed to set;
+    * it carries no ASCII letter at all (``00000``, ``8889``, ``2``) - digits
+      and punctuation alone are not lettering;
+    * its confidence is below :data:`ENGLISH_MIN_CONFIDENCE`, the bar
+      ``typeset_reference.derive`` already uses to call a block's reading
+      uncertain.
+
+    None of the three can distinguish a sound effect the release redrew from
+    dialogue we missed, and none tries to: that exemption is a separate, and so
+    far unimplementable, question (see the perf note).  Segments are the
+    ``{"text", "bbox", "confidence"}`` records ``blocks.json`` stores, or any
+    object with those attributes."""
+    keep: List[Any] = []
+    for seg in segments:
+        if isinstance(seg, Mapping):
+            text, confidence = seg.get("text") or "", _number(seg.get("confidence"))
+        else:
+            text, confidence = getattr(seg, "text", "") or "", _number(getattr(seg, "confidence", None))
+        if _has_cjk(text):
+            continue
+        if not any("a" <= c <= "z" or "A" <= c <= "Z" for c in text):
+            continue
+        if confidence is not None and confidence < ENGLISH_MIN_CONFIDENCE:
+            continue
+        keep.append(seg)
+    return keep
 
 
 def answered_fraction(records: Sequence[Mapping[str, Any]],
@@ -538,7 +618,7 @@ def page_components(scored: Mapping[str, Any], extras: Optional[Mapping[str, Any
         # page_extras knows which blocks are IN SCOPE: it drops stylised onomatopoeia,
         # which this function cannot see.  Recomputing them from scored["blocks"] with
         # only the `untranslated` filter would silently put the SFX blocks back - and
-        # `lines_ref` is 0 (not None) for an SFX block, so line_exact really does
+        # `lines_ref` is 0 (not None) for an SFX block, so line_closeness really does
         # compare them.  The local computation is the fallback for a caller with no
         # extras.
         "leftover_em2_mean": _prefer(extras, "leftover_em2_mean", _mean(leftovers)),
@@ -546,7 +626,7 @@ def page_components(scored: Mapping[str, Any], extras: Optional[Mapping[str, Any
             extras, "size_logratio_rms",
             size_logratio_rms([row.get("cap_ratio") for row in rows])),
         "group_f1": _group_value(extras.get("group_f1")),
-        "line_exact": _prefer(extras, "line_exact", line_exact(rows)),
+        "line_closeness": _prefer(extras, "line_closeness", line_closeness(rows)),
         "text_iou_mean": text_iou_mean,
     }
     if extras.get("reference_weak"):
@@ -690,7 +770,10 @@ def page_extras(scored: Dict[str, Any], truth: Dict[str, Any], *,
     for _ in range(int(summary.get("unpaired_blocks") or 0)):
         owned.append([])
         shared.append(None)
-    loose = list(unassigned if unassigned is not None else (truth.get("unassigned_english") or []))
+    # Noise is dropped ONCE, here, so every consumer of the unassigned pile sees the same
+    # list: group_f1's FN term, answered's denominator and reference_weak's fraction.
+    raw_loose = list(unassigned if unassigned is not None else (truth.get("unassigned_english") or []))
+    loose = trustworthy_english(raw_loose)
     grouping = group_f1(owned, loose + missed_lines, shared, page_em)
 
     # Text IoU: our lettering against the release's, block by block.
@@ -748,7 +831,7 @@ def page_extras(scored: Dict[str, Any], truth: Dict[str, Any], *,
         "leftover_em2_mean": _mean(leftovers),
         "size_logratio_rms": size_logratio_rms(
             [row_at(i).get("cap_ratio") for i in scored_indices if _plausible_ref(row_at(i))]),
-        "line_exact": line_exact(
+        "line_closeness": line_closeness(
             [row_at(i) for i in scored_indices if _plausible_ref(row_at(i))]),
         "implausible_ref_blocks": sum(1 for i in scored_indices
                                       if not _plausible_ref(row_at(i))),
@@ -758,4 +841,5 @@ def page_extras(scored: Dict[str, Any], truth: Dict[str, Any], *,
         "answered": _answered(records, rows, scored_indices, is_sfx, grouping["fn"]),
         "en_lines": total_lines,
         "unassigned_en_lines": len(loose),
+        "unassigned_en_dropped": len(raw_loose) - len(loose),
     }

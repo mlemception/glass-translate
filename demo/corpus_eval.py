@@ -168,7 +168,7 @@ def to_components(raw: Dict[str, Any]) -> Dict[str, Optional[float]]:
         "c_leftover": CS.c_leftover(raw.get("leftover_em2_mean")),
         "c_size": CS.c_size(raw.get("size_logratio_rms")),
         "c_group": CS.c_group(raw.get("group_f1")),
-        "c_lines": CS.c_lines(raw.get("line_exact")),
+        "c_lines": CS.c_lines(raw.get("line_closeness")),
         "c_textiou": CS.c_textiou(raw.get("text_iou_mean")),
     }
 

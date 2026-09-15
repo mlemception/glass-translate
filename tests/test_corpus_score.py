@@ -116,6 +116,29 @@ def test_bleach_every_balloon_zero_art_kept_scores_zero() -> None:
     assert result["R"] == 0.0
 
 
+def test_badly_placed_lettering_hurts_hard_without_annihilating_the_page() -> None:
+    """``c_centre`` is a BOUNDED ramp that reaches 0 at ``CENTRE_SPAN``, and
+    ``CENTRE_SPAN`` is the release's OWN p90 (1.10 em) - a tenth of VIZ's balloons
+    sit at or past the point where this component used to zero a whole page.  It
+    held five of the eleven R = 0 pages down, every one of them with lettering
+    actually drawn: badly placed, not missing.  So it is floored like the other
+    non-degenerate components - it must cost a great deal and still leave the page
+    rankable against the rest of the bad half.
+    """
+    assert "c_centre" in CS._FLOORED_COMPONENTS
+    components = dict(ALL_ONES)
+    components["c_centre"] = CS.c_centre(CS.CENTRE_SPAN * 2.0)
+    assert components["c_centre"] == 0.0  # the component itself still reads a true zero
+    result = CS.page_score(components, 1.0)
+    assert result["R"] > 0.0          # ...but the page stays on the scale
+    assert result["R"] < 60.0         # ...and it is punished hard
+    # The real degenerate guards are untouched: they live in answered and c_erase.
+    assert CS.page_score(dict(ALL_ONES), 0.0)["R"] == 0.0
+    bleached = dict(ALL_ONES)
+    bleached["c_erase"] = CS.c_erase(1.0, 0.0)
+    assert CS.page_score(bleached, 1.0)["R"] == 0.0
+
+
 def test_one_dot_at_optical_centre_scores_near_zero() -> None:
     """Containment and centring are perfect (the dot sits dead centre of its
     balloon) but a single dot is not a line of lettered text.
