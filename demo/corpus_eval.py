@@ -291,6 +291,10 @@ def evaluate_page(pair: Dict[str, Any], ja_archive: CI.Archive, en_archive: CI.A
         # move on a real defect that left overflow_px stuck on zero.
         "uncontained": int((scored.get("summary") or {}).get("uncontained") or 0),
         "collisions": int((scored.get("summary") or {}).get("collisions") or 0),
+        # Reference-free self-checks (glasstranslate/render/selfcheck.py), read back off
+        # the render's own block records.  Unlike everything else in this row they need no
+        # English edition, so they are the only invariants here that also hold in real use.
+        **_self_check_counts(render_dir, tag),
         "blocks": int(extras.get("scored_blocks") or 0),
         "sfx_excluded": int(extras.get("sfx_excluded") or 0),
         "ja_entry": pair.get("ja_entry"),
@@ -457,6 +461,30 @@ def _fmt(value: Any) -> str:
 
 
 # --------------------------------------------------------------------- baseline
+def _self_check_counts(render_dir: Path, tag: str) -> Dict[str, int]:
+    """Roll the render's own per-block self-checks up to the page.
+
+    ``fragments`` - blocks that did not draw every character they were handed;
+    ``bad_breaks`` - blocks whose lines do not read back as the text given, i.e. a
+    break ate its space; ``bubble_ink_px`` - source ink still readable inside the
+    balloons.  All three come from ``glasstranslate/render/selfcheck.py`` by way of
+    ``typeset_dev.block_record``, so they need no reference page.  A render written
+    before those keys existed reports 0, which the gate reads as "held".
+    """
+    path = Path(render_dir) / f"{tag}_blocks.json"
+    if not path.exists():
+        return {"fragments": 0, "bad_breaks": 0, "bubble_ink_px": 0}
+    try:
+        blocks = json.loads(path.read_text(encoding="utf-8")).get("blocks") or []
+    except (OSError, ValueError):
+        return {"fragments": 0, "bad_breaks": 0, "bubble_ink_px": 0}
+    return {
+        "fragments": sum(1 for b in blocks if b.get("text_complete") is False),
+        "bad_breaks": sum(1 for b in blocks if b.get("breaks_clean") is False),
+        "bubble_ink_px": sum(int(b.get("bubble_ink_px") or 0) for b in blocks),
+    }
+
+
 def _gate_payload(rows: Sequence[Dict[str, Any]], summary: Dict[str, Any],
                   tag: str) -> Dict[str, Any]:
     return {
@@ -466,6 +494,9 @@ def _gate_payload(rows: Sequence[Dict[str, Any]], summary: Dict[str, Any],
                                       "leftover_px": int(r.get("leftover_px") or 0),
                                       "uncontained": int(r.get("uncontained") or 0),
                                       "collisions": int(r.get("collisions") or 0),
+                                      "fragments": int(r.get("fragments") or 0),
+                                      "bad_breaks": int(r.get("bad_breaks") or 0),
+                                      "bubble_ink_px": int(r.get("bubble_ink_px") or 0),
                                       "R": r.get("R")}
                   for r in rows if r.get("status") == "scored"},
     }

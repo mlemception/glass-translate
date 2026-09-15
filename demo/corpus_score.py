@@ -335,11 +335,22 @@ def distribution_md(pages: Sequence[Mapping[str, Any]]) -> str:
 # which is inset by the margin) and not `overflow` (measured against the balloon outline).
 # On that same defect `uncontained` fired on 10 pages, and every one of these five counters
 # was bit-identical across a base/restored control pair, so none of them can fire on noise.
+#
+# The last three are the REFERENCE-FREE self-checks of
+# `glasstranslate/render/selfcheck.py`: they compare the render only with the text it was
+# handed and the page it drew on, so unlike every other number here they also hold in real
+# use, on a page nobody has an English edition of.  They catch what a reader notices first
+# and no component of R can see - half a sentence lettered into a balloon, a line break that
+# ate its space ("BEINGAN ADULTISSO CONFUSING!"), and Japanese ink still readable inside a
+# balloon we lettered over.
 _HARD_INVARIANTS = (
     ("overflow", "overflow_px"),
     ("leftover", "leftover_px"),
     ("uncontained blocks", "uncontained"),
     ("panel-border collisions", "collisions"),
+    ("blocks missing text", "fragments"),
+    ("blocks broken mid-word", "bad_breaks"),
+    ("source ink left in a balloon", "bubble_ink_px"),
 )
 
 

@@ -82,6 +82,7 @@ compose_mod = importlib.import_module("glasstranslate.render.compose")  # the pa
 from glasstranslate.render import build_blocks  # noqa: E402
 from glasstranslate.render.compose import block_font_path_for, has_cjk, pil_measurer  # noqa: E402
 from glasstranslate.render.layout import TextBlock  # noqa: E402
+from glasstranslate.render import selfcheck  # noqa: E402
 
 log = logging.getLogger("typeset_dev")
 
@@ -333,12 +334,48 @@ def _rect_list(r: Optional[Rect]) -> Optional[List[int]]:
     return None if r is None else [int(r.x), int(r.y), int(r.w), int(r.h)]
 
 
-def block_record(index: int, block: TextBlock, seg: TranslatedSegment, text: str, ts, from_reference: bool) -> Dict[str, Any]:
+def _self_checks(block: TextBlock, text: str, ts, erased: Optional[np.ndarray]) -> Dict[str, Any]:
+    """The three reference-free invariants of ``render/selfcheck.py``.
+
+    They need no English edition, so unlike every other number in this file
+    they also hold in real use.  ``bubble_ink_px`` is None for free text (no
+    balloon to be clean inside of) and for a page rendered without ``erased``.
+    """
+    lines = [line.text for line in ts.lines] if ts is not None else []
+    st = block.style
+    ink: Optional[int] = None
+    # Balloons only.  Free text over artwork also carries a layout_box and mask - the
+    # open-layout region place.py flowed it through - but there is no balloon there, so
+    # the "ink" under it is the artwork itself.  Measured before this guard went in, block
+    # 4 of v16_p143_8b9f24 (kind "art") reported 40,774 px of "surviving source ink".
+    if erased is not None and st.in_bubble and st.layout_box is not None and st.layout_mask is not None:
+        box = st.layout_box
+        window = erased[box.y: box.y + box.h, box.x: box.x + box.w]
+        gray = window if window.ndim == 2 else cv2.cvtColor(window, cv2.COLOR_BGR2GRAY)
+        mask = np.asarray(st.layout_mask)
+        if gray.shape[:2] == mask.shape[:2]:
+            ink = selfcheck.ink_inside_bubble(
+                gray, mask, block.em_px or st.text_height_px,
+                dark=float(sum(st.bg)) / 3.0 < 128.0)
+    return {
+        "text_complete": selfcheck.text_complete(text, lines),
+        "breaks_clean": selfcheck.breaks_clean(text, lines),
+        "bubble_ink_px": ink,
+    }
+
+
+def block_record(index: int, block: TextBlock, seg: TranslatedSegment, text: str, ts, from_reference: bool,
+                 erased: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """The per-block JSON record of ``<tag>_blocks.json`` (``ts`` is the
-    :class:`Typeset` chosen for the block, or None when it was not lettered)."""
+    :class:`Typeset` chosen for the block, or None when it was not lettered).
+
+    ``erased`` is the page with the source text removed and no lettering on it
+    yet; passing it adds ``bubble_ink_px`` to the record.  See
+    :func:`_self_checks`."""
     st = block.style
     bb = ts.bbox if ts is not None and ts.lines else None
     return {
+        **_self_checks(block, text, ts, erased),
         "index": index,
         "kind": block_kind(block),
         "in_bubble": bool(st.in_bubble),
@@ -514,7 +551,7 @@ def run_page(args: argparse.Namespace, image: Path, out_dir: Path) -> int:
         ceil = f"{st.max_font_px:5.1f}" if st.max_font_px else "-"
         mark = "*" if from_ref[i] else " "
         print(f"{i:>2} {kind:6} {st.text_height_px:5.1f} {ceil:>5} {size_s:>6} {n_s:>2} {box_s:>18} {mark}{text[:60]!r}")
-        records.append(block_record(i, b, seg, text, ts, from_ref[i]))
+        records.append(block_record(i, b, seg, text, ts, from_ref[i], erased))
     print(
         f"{len(segments)} lines -> {len(blocks)} blocks | layout {1000*(t1-t0):.0f} ms"
         f" (group {timings.get('group', 0):.0f}, erase {timings.get('erase', 0):.0f},"
