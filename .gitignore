@@ -38,3 +38,4 @@ renderer/.venv/
 
 # per-cycle renders of before.png written by the development (docs/NOTES.md)
 /incremental/
+docs/RUN_COMPLETE
