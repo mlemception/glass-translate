@@ -75,10 +75,24 @@ def has_cjk(text: str) -> bool:
 
 
 def block_italic(style: SegmentStyle) -> bool:
-    """Dialogue (vertical source text: speech, thought, narration) is
-    lettered in italic; horizontal source lines are captions, titles or sound
-    effects and stay upright."""
-    return bool(style.vertical)
+    """Whether a block is lettered in the italic face.  Nothing is, today.
+
+    This used to return ``style.vertical``, so every speech, thought and
+    narration block was set oblique, on the stated convention that translated
+    manga letters dialogue in italic.  The corpus does not bear that out.
+    Measured as the de-shear angle that best aligns vertical stems, the
+    reference edition's own English ink comes out at -2.0, +1.5, -2.5, +0.0
+    and -5.0 degrees over five pages, while the two bundled faces measure
+    ``animeace2_reg`` +0.0 and ``animeace2_ital`` **+14.0**.  Two blind reviews
+    raised the slant unprompted, on different pages, before it was measured.
+
+    The convention is real, but it is for *thought* and flashback, and nothing
+    available here tells a thought balloon from a speech balloon.  Defaulting
+    every balloon to italic is measurably further from the release than
+    defaulting every balloon to roman, so it defaults to roman.  The italic
+    face stays bundled and reachable through :func:`manga_font_path` for when
+    a signal exists."""
+    return False
 
 
 def block_font_path_for(style: SegmentStyle, text: str, fallback: Optional[str]) -> Optional[str]:

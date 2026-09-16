@@ -220,3 +220,32 @@ def test_antialiased_white_on_black_is_read_as_white_not_grey() -> None:
     assert min(bg) < 60, f"dark paper misread as {bg}"
     luma = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
     assert luma > 165, f"white lettering read as grey {fg} (luma {luma:.0f})"
+
+
+# ------------------------------------------------- upright dialogue (cycle 6)
+
+def test_dialogue_is_lettered_upright_not_italic() -> None:
+    """The release sets ordinary dialogue in a roman face, not an oblique one.
+
+    Measured over the corpus: the reference's own English ink de-shears to
+    -2.0, +1.5, -2.5, +0.0 and -5.0 degrees on five pages, while the bundled
+    ``animeace2_ital`` measures +14.0 and ``animeace2_reg`` +0.0.  Two blind
+    judges raised the slant independently before it was measured.
+    """
+    from glasstranslate.core.types import Rect, SegmentStyle
+    from glasstranslate.render.compose import block_font_path_for, block_italic, manga_font_path
+
+    dialogue = SegmentStyle(fg=(0, 0, 0), bg=(255, 255, 255), angle_deg=0.0,
+                            text_height_px=20.0, vertical=True,
+                            layout_box=Rect(0, 0, 100, 100), in_bubble=True)
+    assert block_italic(dialogue) is False, "vertical dialogue is still lettered in the italic"
+    assert block_font_path_for(dialogue, "HELLO", None) == manga_font_path(False)
+
+
+def test_the_italic_face_is_still_available() -> None:
+    """Kept for the real convention - thought and flashback - if a signal ever
+    distinguishes them."""
+    from glasstranslate.render.compose import manga_font_path
+
+    assert manga_font_path(True) is not None
+    assert manga_font_path(True) != manga_font_path(False)
