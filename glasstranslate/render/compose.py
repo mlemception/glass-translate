@@ -242,7 +242,89 @@ def _measure_cached(font_path: Optional[str], size_px: int, text: str) -> tuple[
     return width, float(ascent + descent)
 
 
-def pil_measurer(font_path: Optional[str] = None) -> Measure:
+# --- condensation ----------------------------------------------------------
+# The reference letters in a face about 14 % narrower than ours: "POSSIBLE."
+# spans 6.6 cap-heights there against 7.727 in ``animeace2_reg``.  No condensed
+# cut of the face is licensed to us, so the glyphs are squeezed horizontally at
+# DRAW TIME - a rendering operation, like synthetic bold.  Generating a
+# condensed ``.ttf`` would be modifying and redistributing the font, which its
+# licence forbids; do not do it.
+#
+# This does not make the type bigger: the size ceiling is a multiple of the
+# source em (``place.size_ceiling``) and the fitter only shrinks from it.  It
+# buys back the shrink - measured over tag ``cjk1``, 65 % of blocks render
+# BELOW the ceiling (median 0.89 of it) and those carry the whole size deficit
+# against the reference (median cap_ratio 0.85, against 1.00 for blocks that
+# reach the ceiling).  More characters per line means fewer of them have to
+# step down.
+CONDENSE_RATIO = 0.854
+
+
+def condenses(style) -> bool:
+    """Whether ``style``'s block is condensed.
+
+    Balloon dialogue is; free text over artwork is NOT.  Free text has no
+    container to grow safely inside, so recovering its size walks into panel
+    borders: at the full ratio ``v21_p079_e81a99`` b1 rose from 0.63 to 0.70 of
+    its ceiling and gained a one-pixel panel-border collision, which is a hard
+    invariant.  Balloons grow into their own interior, which the inset already
+    guards.
+    """
+    return bool(getattr(style, "in_bubble", False))
+
+
+def _condense_tile(tile: Image.Image, ratio: float = CONDENSE_RATIO) -> Image.Image:
+    """``tile`` squeezed horizontally about its own centre."""
+    w = max(1, int(round(tile.width * ratio)))
+    if w == tile.width:
+        return tile
+    return tile.resize((w, tile.height), Image.Resampling.LANCZOS)
+
+
+def _composite_clipped(target: Image.Image, tile: Image.Image, x: int, y: int) -> None:
+    """Alpha-composite ``tile`` at ``(x, y)``, clipped to ``target``.
+
+    ``Image.alpha_composite`` raises when the box leaves the image, and a line
+    near a page edge legitimately does; the old ``draw.text`` clipped silently.
+    """
+    sx, sy = max(-x, 0), max(-y, 0)
+    dx_, dy_ = max(x, 0), max(y, 0)
+    w = min(tile.width - sx, target.width - dx_)
+    h = min(tile.height - sy, target.height - dy_)
+    if w <= 0 or h <= 0:
+        return
+    target.alpha_composite(tile.crop((sx, sy, sx + w, sy + h)), dest=(dx_, dy_))
+
+
+def _blit_condensed(
+    target: Image.Image,
+    text: str,
+    font,
+    cx: float,
+    top: float,
+    fill: tuple[int, int, int, int],
+    stroke_width: int = 0,
+    stroke_fill: Optional[tuple[int, int, int, int]] = None,
+    ratio: float = CONDENSE_RATIO,
+) -> None:
+    """Draw ``text`` condensed, centred on ``cx`` with its top at ``top``.
+
+    Rendered at natural width into its own tile and squeezed, because PIL
+    cannot transform glyph outlines.  Per line rather than per block: a
+    block's lines do not share one axis (``typeset.py`` gives each line its
+    own ``cx`` from its row span), so a single scale origin would shift them.
+    """
+    pad = stroke_width + 2
+    natural = font.getlength(text)
+    ascent, descent = font.getmetrics()
+    tile = Image.new("RGBA", (max(1, int(natural) + 1 + 2 * pad), ascent + descent + 2 * pad), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).text((pad, pad), text, font=font, fill=fill,
+                              stroke_width=stroke_width, stroke_fill=stroke_fill)
+    tile = _condense_tile(tile, ratio)
+    _composite_clipped(target, tile, int(round(cx - tile.width / 2.0)), int(round(top - pad)))
+
+
+def pil_measurer(font_path: Optional[str] = None, *, condense: bool = False) -> Measure:
     """Build a ``measure(text, size) -> (width, height)`` callable backed by
     PIL font metrics for ``font_path`` (default: :func:`default_font_path`).
     Height is the font's ascent+descent so line stacking is consistent
@@ -252,7 +334,8 @@ def pil_measurer(font_path: Optional[str] = None) -> Measure:
     path = font_path if font_path is not None else default_font_path()
 
     def measure(text: str, size: float) -> tuple[float, float]:
-        return _measure_cached(path, max(_MIN_FONT_PX, int(round(size))), text)
+        w, h = _measure_cached(path, max(_MIN_FONT_PX, int(round(size))), text)
+        return (w * CONDENSE_RATIO, h) if condense else (w, h)
 
     return measure
 
@@ -384,7 +467,7 @@ def _draw_block(
     box = style.layout_box
     assert box is not None
     if abs(style.angle_deg) < 0.5:
-        draw_typeset(ImageDraw.Draw(canvas), ts, font, style.fg, style.bg, style.outline)
+        draw_typeset(canvas, ts, font, style.fg, style.bg, style.outline, condense=condenses(style))
         return
     # Angled block: draw into a layer covering the layout box and the placed
     # lines, rotate it about the layout box centre.
@@ -394,7 +477,8 @@ def _draw_block(
         pad = halo_px(ts.size) + weight_px(ts.size) + 2
         ext = ext.union(Rect(bb.x - pad, bb.y - pad, bb.w + 2 * pad, bb.h + 2 * pad))
     layer = Image.new("RGBA", (max(1, ext.w), max(1, ext.h)), (0, 0, 0, 0))
-    draw_typeset(ImageDraw.Draw(layer), ts, font, style.fg, style.bg, style.outline, dx=ext.x, dy=ext.y)
+    draw_typeset(layer, ts, font, style.fg, style.bg, style.outline, dx=ext.x, dy=ext.y,
+                 condense=condenses(style))
     cx, cy = box.x + box.w / 2.0, box.y + box.h / 2.0
     # The layer is centred on ``ext``; rotate about the layout box centre.
     _paste_rotated_about(canvas, layer, style.angle_deg, ext.x + ext.w / 2.0, ext.y + ext.h / 2.0, cx, cy)
@@ -411,7 +495,7 @@ def weight_px(size: float) -> int:
 
 
 def draw_typeset(
-    draw: ImageDraw.ImageDraw,
+    target: Image.Image,
     ts: Typeset,
     font,
     fg: tuple[int, int, int],
@@ -420,23 +504,28 @@ def draw_typeset(
     *,
     dx: float = 0.0,
     dy: float = 0.0,
+    condense: bool = True,
 ) -> None:
-    """Draw the placed lines of ``ts`` with PIL, offset by ``(-dx, -dy)``.
+    """Draw the placed lines of ``ts`` onto ``target``, offset by ``(-dx, -dy)``.
     Two passes: first the rounded paper-coloured halo of every line (only
     when ``outline``), then the letters with a thin foreground stroke that
     approximates the heavier weight of professional lettering.  Drawing all
     halos before any letters keeps a line's halo from cutting into the
-    descenders of the line above."""
+    descenders of the line above.
+
+    Every line is squeezed to :data:`CONDENSE_RATIO` by :func:`_blit_condensed`,
+    so the lines are positioned by their centre ``cx`` rather than by a left
+    edge derived from a width the glyphs no longer have."""
     weight = weight_px(ts.size)
+    ratio = CONDENSE_RATIO if condense else 1.0
     if outline:
         halo = halo_px(ts.size) + weight
         for line in ts.lines:
-            x = line.cx - line.width / 2.0 - dx
-            draw.text((x, line.top - dy), line.text, font=font, fill=(*bg, 255), stroke_width=halo, stroke_fill=(*bg, 255))
+            _blit_condensed(target, line.text, font, line.cx - dx, line.top - dy,
+                            (*bg, 255), halo, (*bg, 255), ratio)
     for line in ts.lines:
-        x = line.cx - line.width / 2.0 - dx
-        draw.text((x, line.top - dy), line.text, font=font, fill=(*fg, 255),
-                  stroke_width=weight, stroke_fill=(*fg, 255) if weight else None)
+        _blit_condensed(target, line.text, font, line.cx - dx, line.top - dy,
+                        (*fg, 255), weight, (*fg, 255) if weight else None, ratio)
 
 
 def _paste_rotated_about(
@@ -513,7 +602,8 @@ def compose(
             bpath: Optional[str] = block_font_path
         else:
             bpath = block_font_path_for(seg.style, text, path)
-        _draw_block(canvas, seg, bpath, pil_measurer(bpath), hide_original=False, uppercase=uppercase)
+        _draw_block(canvas, seg, bpath, pil_measurer(bpath, condense=condenses(seg.style)),
+                    hide_original=False, uppercase=uppercase)
 
     for seg in plain:
         quad = np.asarray(seg.quad, dtype=np.float64).reshape(4, 2)
