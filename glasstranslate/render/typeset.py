@@ -331,11 +331,28 @@ def clip_spans(spans: np.ndarray, top: float, rect: Rect) -> Tuple[np.ndarray, f
     return out, top + r0
 
 
-def _line_budget(spans: np.ndarray, top: float, bottom: float, base_y: float) -> Tuple[float, float]:
+def _line_budget(spans: np.ndarray, top: float, bottom: float, base_y: float,
+                 anchor_x: Optional[float] = None) -> Tuple[float, float]:
     """``(width, centre_x)`` available to a line inking rows ``[top, bottom)``
     (absolute y).  The width is the *intersection* of the row spans so every
     glyph of the line stays inside the region.  Reference implementation of
-    :meth:`_Spans.budgets` (kept for tests and single queries)."""
+    :meth:`_Spans.budgets` (kept for tests and single queries).
+
+    With an ``anchor_x`` the intersection is cut **symmetric about that axis**
+    instead, ``half = min(anchor_x - left, right - anchor_x)``.  A block is
+    already centred on one axis - :func:`.anchor.line_centre` aims every line
+    at it - but that function can only clamp a line into the budget it is
+    given, and the intersection's centre is not the axis wherever the region
+    is lopsided about it, which on a balloon is most rows.  A line as wide as
+    its budget then has no slack and takes the row's centre, so the block
+    wanders: measured std 7.56 px against a professionally lettered 0.45 px.
+
+    Making the budget symmetric puts the axis at its centre by construction,
+    so the clamp can no longer pull a line off it, and the budget stays a
+    strict subset of the intersection, so nothing leaves the region.  The
+    taper a letterer draws round an oval falls out of it - the symmetric
+    half-width is small at the top and bottom and widest at the waist - with
+    no rule anywhere saying to make one."""
     r0 = max(0, int(np.floor(top - base_y)))
     r1 = min(spans.shape[0], int(np.ceil(bottom - base_y)))
     if r1 <= r0:
@@ -345,7 +362,12 @@ def _line_budget(spans: np.ndarray, top: float, bottom: float, base_y: float) ->
     right = float(rows[:, 1].min())
     if right <= left:
         return 0.0, 0.0
-    return right - left, (left + right) / 2.0
+    if anchor_x is None:
+        return right - left, (left + right) / 2.0
+    half = min(anchor_x - left, right - anchor_x)
+    if half <= 0.0:
+        return 0.0, 0.0
+    return 2.0 * half, float(anchor_x)
 
 
 class _Spans:
@@ -354,9 +376,10 @@ class _Spans:
     computed in one vectorised call instead of one ``max``/``min`` per line
     per offset (the dominant cost of flowing bubble text)."""
 
-    def __init__(self, spans: np.ndarray, top: float) -> None:
+    def __init__(self, spans: np.ndarray, top: float, anchor_x: Optional[float] = None) -> None:
         self.spans = spans
         self.top = float(top)
+        self.anchor_x = None if anchor_x is None else float(anchor_x)
         self.h = int(spans.shape[0])
         left = np.ascontiguousarray(spans[:, 0], dtype=np.float64)
         right = np.ascontiguousarray(spans[:, 1], dtype=np.float64)
@@ -396,8 +419,15 @@ class _Spans:
             left[sel] = np.maximum(tl[a], tl[b])
             right[sel] = np.minimum(tr[a], tr[b])
         ok = valid & (right > left)
-        widths[ok] = right[ok] - left[ok]
-        centres[ok] = (left[ok] + right[ok]) / 2.0
+        if self.anchor_x is None:
+            widths[ok] = right[ok] - left[ok]
+            centres[ok] = (left[ok] + right[ok]) / 2.0
+            return widths, centres
+        # Symmetric about the axis; see :func:`_line_budget`.
+        half = np.minimum(self.anchor_x - left, right - self.anchor_x)
+        ok &= half > 0.0
+        widths[ok] = 2.0 * half[ok]
+        centres[ok] = self.anchor_x
         return widths, centres
 
 
@@ -672,8 +702,15 @@ def typeset(
     else:
         centre_y = optical[1] if optical is not None else (region_top + region_bottom) / 2.0
     centre_y = min(max(centre_y, region_top), region_bottom)
-    widest_span = float(np.max(spans[:, 1] - spans[:, 0]))
-    sp = _Spans(spans, top)
+    if anchor_x is None:
+        widest_span = float(np.max(spans[:, 1] - spans[:, 0]))
+    else:
+        # The widest line that any budget can supply, which under symmetric
+        # budgets is narrower than the widest row: handing the search the raw
+        # value would let it believe in a width no row can actually offer.
+        widest_span = float(max(0.0, 2.0 * np.max(
+            np.minimum(anchor_x - spans[:, 0], spans[:, 1] - anchor_x))))
+    sp = _Spans(spans, top, anchor_x)
 
     size0 = max(max_size, min_size)
     size = size0
