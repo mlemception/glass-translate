@@ -95,6 +95,8 @@ COMPARISONS_DIR = PROJECT_ROOT / "more_comparisons"
 DEFAULT_IMAGE = EXAMPLES_DIR / "before.jpg"
 DEFAULT_REFERENCE = EXAMPLES_DIR / "after.webp"
 ALIGNED_REFERENCE_NAME = "eng_aligned.png"  # written by demo/typeset_reference.py
+from reftext_join import repair_joined_text  # noqa: E402
+
 LEGACY_REFERENCE_TEXT = "reference_text.json"  # the pre-2026-09-10 name of reference_text_before.json
 _PAIR_SUFFIXES = ("ja", "jp")  # <n>ja.jpg / <n>jp.jpg pair with <n>eng.jpg
 _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
@@ -156,7 +158,8 @@ def load_reference_text(stem: str, root: Optional[Path] = None) -> Dict[str, str
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {k: v for k, v in data.items() if k and not k.startswith("_") and isinstance(v, str)}
+    return {k: repair_joined_text(v) for k, v in data.items()
+            if k and not k.startswith("_") and isinstance(v, str)}
 
 
 def reference_image_for(image: Path) -> Optional[Path]:

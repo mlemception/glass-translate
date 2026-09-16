@@ -120,3 +120,123 @@ def test_ordinals_and_abbreviations_survive() -> None:
     """
     for text in ("23rd", "26th", "25th", "2nd", "MT. FUJI", "IS MT."):
         assert CM.suspicious_tokens(text) == [], f"{text!r} was called garbled"
+
+
+# -------------------------------------------- joining a block's printed lines
+# The published page breaks words across lines and the OCR reads each printed
+# line separately.  Joining with a space made ``engage-`` + ``ment`` into
+# ``ENGAGE- MENT``: two tokens where the page has one word, which our renderer
+# then wrapped at.  29 of 316 blocks in the 50-page sample carried one.
+
+from reftext_join import join_reference_lines, should_drop_hyphen  # noqa: E402
+
+
+def test_a_word_broken_across_printed_lines_is_rejoined() -> None:
+    """The behavioural change: the old code produced 'engage- ment'."""
+    assert join_reference_lines(["engage-", "ment of the"]) == "engagement of the"
+    assert join_reference_lines(["danger-", "ous"]) == "dangerous"
+    assert join_reference_lines(["remem-", "ber"]) == "remember"
+
+
+def test_the_target_three_example_is_one_word_again() -> None:
+    """v11_p133_808ab5 b4 read 'AUSPI- CIOUS BEAST SUMMON'."""
+    assert join_reference_lines(["auspi-", "cious beast summon"]) == "auspicious beast summon"
+
+
+def test_ordinary_lines_still_join_with_one_space() -> None:
+    assert join_reference_lines(["the size of", "utahime's ribbon"]) == "the size of utahime's ribbon"
+    assert join_reference_lines(["  a  ", "", "  b  "]) == "a b"
+
+
+def test_a_folded_em_dash_is_not_a_line_break_hyphen() -> None:
+    """compose._FOLD_TABLE maps the em dash to '--'; it must not fuse words."""
+    assert join_reference_lines(["wait--", "he said"]) == "wait-- he said"
+
+
+def test_a_non_alphabetic_stem_keeps_its_hyphen_but_still_loses_the_space() -> None:
+    """Removing the space is always right; removing the hyphen is a judgement.
+
+    ``11-`` is not a word continuing, so the hyphen stays - but ``11-seconds``
+    is still better than the ``11- seconds`` the old join produced, and it is
+    one token, so it cannot wrap at the fake break.
+    """
+    assert join_reference_lines(["for 11-", "seconds"]) == "for 11-seconds"
+
+
+def test_a_single_line_and_an_empty_block_are_unchanged() -> None:
+    assert join_reference_lines(["only one"]) == "only one"
+    assert join_reference_lines([]) == ""
+    assert join_reference_lines(["", "   "]) == ""
+
+
+def test_the_hyphen_is_kept_when_the_evidence_does_not_say_to_drop_it() -> None:
+    """False is the safe answer: a kept hyphen reads as a compound, a dropped
+    one fuses two words."""
+    assert should_drop_hyphen("", "word") is False
+    assert should_drop_hyphen("word", "") is False
+    assert should_drop_hyphen("11", "seconds") is False
+    assert should_drop_hyphen("o'clock", "ish") is False
+
+
+def test_a_compound_broken_at_its_own_hyphen_is_a_KNOWN_MISS() -> None:
+    """Documented limitation, pinned so an improvement is noticed.
+
+    'specialgrade' really does have a legal hyphenation point after 'special',
+    so pyphen cannot separate this from a line break.  The space is still
+    removed, so the line-count repair holds; only the hyphen is wrong.  A
+    corpus-internal check would fix 'fushi-guro' but needs a cross-page index.
+    """
+    assert join_reference_lines(["special-", "grade"]) == "specialgrade"  # wanted: special-grade
+    assert join_reference_lines(["fushi-", "guro"]) == "fushi-guro"  # wanted: fushiguro
+
+
+def test_a_bare_string_is_one_line_not_a_list_of_characters() -> None:
+    """``str`` satisfies ``Iterable[str]``, so this is an easy caller mistake."""
+    assert join_reference_lines("engage- ment") == "engage- ment"
+
+
+def test_a_productive_prefix_keeps_its_hyphen() -> None:
+    """``nonsorcerers`` has a legal break after ``non``, so pyphen alone fused
+    it three times on one page.  The prefix list is what stops that."""
+    assert join_reference_lines(["non-", "sorcerers"]) == "non-sorcerers"
+    assert join_reference_lines(["self-", "aware"]) == "self-aware"
+    assert should_drop_hyphen("non", "sorcerers") is False
+
+
+def test_the_whole_trailing_word_is_captured_not_a_suffix_of_it() -> None:
+    """Regression: a lookbehind once cut the first letter off, so ``NON-`` was
+    read as ``ON-`` and the prefix list never matched."""
+    from reftext_join import _BREAK
+
+    assert _BREAK.search("PROTECT NON-").group(1) == "NON"
+    assert _BREAK.search("ENGAGE-").group(1) == "ENGAGE"
+    assert _BREAK.search("wait--") is None
+
+
+# The stored reftext files were bootstrapped with the old space-join and are
+# never rewritten (typeset_reference only writes when the file is absent, so
+# hand corrections survive) and are gitignored, so they are not safely
+# revertible.  The repair is applied on READ instead.
+
+from reftext_join import repair_joined_text  # noqa: E402
+
+
+def test_an_already_joined_string_is_repaired_on_read() -> None:
+    assert repair_joined_text("ENGAGE- MENT IS HARD") == "ENGAGEMENT IS HARD"
+    assert repair_joined_text("FOR 11 SEC- ONDS..") == "FOR 11 SECONDS.."
+    assert repair_joined_text("NON- SORCERERS...") == "NON-SORCERERS..."
+    assert repair_joined_text("meet- and-greet") == "meet-and-greet"
+
+
+def test_the_repair_leaves_clean_text_alone_and_is_idempotent() -> None:
+    for text in ("nothing to fix here", "wait-- he said", "", "a-b c-d"):
+        assert repair_joined_text(text) == text
+    once = repair_joined_text("ENGAGE- MENT")
+    assert repair_joined_text(once) == once
+
+
+def test_the_read_repair_and_the_line_join_agree() -> None:
+    """Two entry points, one decision - they must not drift apart."""
+    for left, right in (("engage", "ment"), ("non", "sorcerers"), ("first", "years"),
+                        ("auspi", "cious"), ("sec", "onds")):
+        assert join_reference_lines([left + "-", right]) == repair_joined_text(f"{left}- {right}")

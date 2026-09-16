@@ -60,6 +60,7 @@ from glasstranslate.render import build_blocks  # noqa: E402
 from glasstranslate.render.layout import TextBlock  # noqa: E402
 import typeset_dev as TD  # noqa: E402
 import corpus_metrics as CM
+from reftext_join import join_reference_lines
 
 log = logging.getLogger("typeset_reference")
 
@@ -754,7 +755,7 @@ def derive(image: Path, *, out_root: Path = TD.REFERENCE_ROOT, device: str = "au
         else:
             english_ink[:] = False
         stats = lettering_stats(english_ink, interior, b.em_px or b.style.text_height_px, ownership[i])
-        text = " ".join(s.text.strip() for s in lines if s.text.strip())
+        text = join_reference_lines(s.text for s in lines)
         if not lines or min(s.confidence for s in lines) < 0.6:
             uncertain.append(b.segment.text)
         gt_removed = int((gt.erase & region).sum())
