@@ -4,6 +4,66 @@ All notable changes to GlassTranslate are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-16
+
+Lettering, judged blind. Every slice below was accepted only when a blind comparison of
+the change preferred it, with the two renders unlabelled, their order randomised per
+comparison, and the answer key read afterwards. Two of every eight comparisons were blocks the
+change was not expected to touch, as a check that the judge was not inventing differences.
+
+### Changed
+
+- **Balloons are found by the ink that closes them, not the paper inside them.** The layout
+  pass flood-filled paper, and paper leaks: a plainly drawn oval could be missed entirely, so
+  its text was lettered as free text over artwork — the original lettering left underneath,
+  grey haloed English spilling past the balloon edge. When the paper pass places nothing, the
+  renderer now traces what the page's own ink encloses and offers that instead.
+
+- **The ink colour is sampled from the ink, not the average of the ink and the paper.** Colour
+  extraction returned the *median* of the foreground cluster, which on fine type is a blend of
+  the two, so lettering came out mid-grey against a reference that is solidly black. Blocks
+  lettering mid-grey fell from 47 in 316 to 5; blocks reaching pure black rose from 242 to
+  283.
+
+- **Line budgets are cut symmetric about the block's own axis.** The budget handed to the
+  centring step was the raw per-row measurement, whose middle is not the block's middle, so
+  a line with no slack adopted the row's centre and the block wandered down the balloon.
+  Placement wander fell from 5.49 to **0.00** mean standard deviation. It costs about 2.4 % in
+  mean type size, which was predicted in advance and accepted.
+
+- **Dialogue is lettered upright.** Every speech, thought and narration block was set oblique
+  on the stated convention that translated comics italicise dialogue. Measured against a
+  professionally lettered edition, that edition's own English de-shears to between −2.0° and
+  +1.5°, while the bundled italic face measures **+14.0°**. The convention is real but it is
+  for *thought* and flashback, and nothing available distinguishes a thought balloon from a
+  speech balloon. The italic face stays bundled for when a signal exists.
+
+- **One stray glyph no longer re-faces a whole balloon.** The lettering face was chosen on
+  "does this text contain any CJK at all", so a single misread character threw the entire
+  block into the CJK system font — losing its typeface, its weight and its apostrophe shape,
+  and displaying the offending character into the bargain. The test is now a ratio: a block
+  is lettered in the system face only when CJK is at least half of it. A stray character in
+  otherwise-Latin text is dropped instead.
+
+### Fixed
+
+- **The evaluation renderer no longer draws empty boxes for characters its font lacks.**
+  Text is folded to the face that will letter it — a table for punctuation and stroked Latin
+  letters, then a compatibility fold for accents, then deletion, because a black box is worse
+  than any substitute. **This affects the PIL renderer used by the evaluation harness, not the
+  application's own Qt renderer**, which does per-character font fallback and did not have the
+  defect. It is recorded here for completeness, not as a user-facing improvement.
+
+### Notes
+
+- Upgrading: replace the executable, or unpack both zips into the same folder. The portable
+  bundle ships as a **pair** — `GlassTranslate-0.3.0-portable-win64.zip` and
+  `GlassTranslate-0.3.0-models-win64.zip` — which unpack into the same layout; each has a
+  `.sha256` sidecar, and nothing is downloaded at build time.
+- The optional quality renderer repairs tone damage around erased text. It does **not**
+  rebuild destroyed line art, measured on six pages, and it peaks around **11 GB of VRAM**.
+- No change to the overlay window's appearance or to the control panel.
+
 ## [0.2.5] - 2026-09-15
 
 Typesetting and erasing, measured page by page against a professionally lettered English
