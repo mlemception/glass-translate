@@ -89,7 +89,24 @@ HOUGH_MIN_LEN = 0.8  # glyphs
 HOUGH_OUTSIDE = 0.4  # glyphs of a straight line outside the text zone to count as continuing art
 HOUGH_OUTSIDE_HATCH = 0.15  # ...for a line in a direction of the hatching field around the text
 HOUGH_EXTEND = 1.2  # glyphs a kept art line is extrapolated on each side through the text zone
-HOUGH_MAX_LINES = 30  # longest candidate lines followed per block (hatching yields hundreds)
+# Longest candidate lines followed per block.  This is a COST BOUND, not a
+# classifier: every line that reaches it has already been detected on the art
+# mask (glyphs removed) and must still show clear run outside the text zone, so
+# following more of them can only keep ink, never erase more.
+#
+# It was 30, and hatching does yield hundreds - measured over 11 blocks on the
+# four worst-damaged corpus pages, `_art_lines` detects a median of 182
+# candidates and up to 1097, with 30 of 33 calls over the old cap.  The worst
+# block protected 2.7 % of the art it had already identified and the rest was
+# erased.  Sweeping the cap moved the share of the letterer's kept artwork we
+# destroy: 59.4 % at 30, 55.4 % at 100, 51.4 % at 300, 49.9 % at 1200, for
+# +19 % erase time at 300 on those four pages and nothing at all on pages that
+# never reach 30 candidates.  300 is where the curve turns; past it the cost
+# keeps rising and the recovery does not.
+#
+# Raising this does NOT fix the defect on its own - half the artwork still dies
+# at 1200, so the remaining damage is somewhere else.
+HOUGH_MAX_LINES = 300
 # px: the largest glyph the art-line DETECTOR scales its thresholds by.
 #
 # Everything else in this module is a multiple of the block's glyph because it describes the
