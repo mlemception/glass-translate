@@ -67,13 +67,26 @@ PIECE_MIN = 0.1  # small pieces collected inside a swept column / furigana strip
 MIN_FILL = 0.18  # ink area / bbox area below which a candidate is a thin diagonal art stroke
 FULL_INSIDE = 0.8  # fraction of a component inside the boxes that makes it a glyph outright
 NEAR_ART = 3  # px: pieces this close to art (big components) are art fragments, not glyphs
-HATCH_MIN_LEN = 0.35  # glyphs: shortest stroke that can be a hatching stroke
+# Hatching rescue.  A broken speed line inside an OCR box is glyph-sized, partly
+# inside and not touching the border, so the free-text branch of `_classify`
+# claims it as a glyph; `_hatching` is the only thing that gives it back.  These
+# three were measured together over the six worst-damaged corpus pages: the
+# artwork we destroy falls 51.1 % -> 43.7 % and erase precision rises 0.648 ->
+# 0.657, at a recall cost of 0.939 -> 0.921.  Swept one at a time first, so the
+# contribution of each is known: reach 47.6 %, min-len 49.0 %, field 49.8 %.
+#
+# `HATCH_REACH` is the strongest and saturates at 2.0 (3.0 measured slightly
+# worse on both axes).  `HATCH_FILL` and `HATCH_ANGLE` were swept and do
+# essentially nothing - which is the useful finding: these strokes are not
+# failing the direction test, they are failing to find a FIELD to belong to,
+# and reach is what finds it.
+HATCH_MIN_LEN = 0.20  # glyphs: shortest stroke that can be a hatching stroke
 HATCH_FILL = 0.35  # ink / bbox area above which a stroke is not a thin diagonal
 HATCH_ELONG = 3.0  # major / minor extent of a hatching stroke
 HATCH_AXIS = 15.0  # degrees from horizontal/vertical below which a stroke may be a glyph stroke
 HATCH_ANGLE = 15.0  # degrees a stroke may deviate from a hatching direction of the field
-HATCH_FIELD = 4  # strokes of one direction outside the text (within HATCH_REACH) that make a hatching field
-HATCH_REACH = 1.0  # glyphs around the text boxes in which the field is looked for
+HATCH_FIELD = 2  # strokes of one direction outside the text (within HATCH_REACH) that make a hatching field
+HATCH_REACH = 2.0  # glyphs around the text boxes in which the field is looked for
 SWEEP_GAP = 0.8  # gap (glyphs) bridged when completing a column
 SWEEP_MAX = 2.5  # how far (glyphs) a column may be extended in one direction
 SWEEP_BODY = 0.4  # only components at least this big (glyphs) extend a column
