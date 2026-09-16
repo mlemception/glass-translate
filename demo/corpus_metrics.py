@@ -63,6 +63,20 @@ ENGLISH_BOX_PAD = 2  # px the English OCR boxes grow before masking their ink (t
 # that bar was never applied, and it is the place it matters most - see `trustworthy_english`.
 ENGLISH_MIN_CONFIDENCE = 0.6
 
+# Letters that may stand alone as an English word.
+_LONE_WORDS = frozenset("AI")
+_VOWELS = frozenset("AEIOUY")
+# All-consonant strings that really are words in comic lettering, so the
+# no-vowel rule below must not condemn them.
+_NO_VOWEL_WORDS = frozenset({
+    "MM", "MMM", "HM", "HMM", "HMMM", "HMPH", "SHH", "SHHH", "TSK", "PSST",
+    "BRR", "GRR", "GRRR", "PFFT", "PHHT", "NNN", "ZZZ", "GH", "TCH", "PFF",
+    "MR", "MRS", "MS", "DR", "ST", "TV", "SFX", "PS", "VS", "MT", "FT", "JR",
+    # Ordinal suffixes: "23rd" strips to "rd", which has no vowel and is not
+    # a word, but the token it came from is perfectly good text.
+    "RD", "TH", "ND",
+})
+
 # The keys :func:`page_components` always returns, in the order the score reads
 # them.  ``corpus_score`` maps them through its own ``c_*`` functions (erase_iou
 # and art_kept share one component); the weights live only in that module.
@@ -319,6 +333,68 @@ def _has_cjk(text: str) -> bool:
     imported because this module must not pull in the render stack)."""
     return any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
                or 0xFF00 <= ord(c) <= 0xFFEF for c in text)
+
+
+def suspicious_tokens(text: str) -> List[str]:
+    """Tokens in ``text`` that cannot be English words, needing no dictionary.
+
+    Two rules, both chosen to be unarguable rather than complete:
+
+    * a lone letter that is not ``A`` or ``I``;
+    * an alphabetic token with no vowel, unless it is one of the noises comic
+      lettering really does set (``HMPH``, ``TSK``, ``MR``...).
+
+    Deliberately conservative.  On ``"WANT THO T TO SON I TS BEST WAY"`` it
+    returns ``T`` and ``TS`` and stays silent on ``THO``, ``SON`` and ``I``,
+    which are words standing in the wrong place - so a count of these is a
+    *lower bound* on how garbled a line is, and never a false alarm on real
+    lettering.  Over the 60 paired pages it fires on 7.1 % of blocks.
+
+    It exists because confidence cannot do this job: the visibly-wrong lines
+    have a p90 confidence of 1.000 (``GHHH`` scores 1.000, ``3W`` 0.995), and
+    a 0.90 floor would still miss more than a third of them while throwing
+    away one clean line in thirteen.
+    """
+    out: List[str] = []
+    for raw in (text or "").split():
+        tok = "".join(ch for ch in raw.upper() if ch.isalpha() or ch == "'")
+        tok = tok.strip("'")
+        if not tok or not tok.isalpha():
+            continue
+        if len(tok) == 1:
+            if tok not in _LONE_WORDS:
+                out.append(raw)
+        elif not (set(tok) & _VOWELS) and tok not in _NO_VOWEL_WORDS and not _stretched(tok):
+            out.append(raw)
+    return out
+
+
+def _stretched(tok: str) -> bool:
+    """A held sound effect: some letter repeated three or more times running.
+
+    ``GHHH``, ``BRRRR``, ``PFFFT`` are lettering, not misreads, and listing
+    every one a letterer might draw is a losing game.  Three in a row is the
+    pattern they share and that no misread of real words produces; ``TTS``,
+    with two, stays caught."""
+    return any(tok[i] == tok[i + 1] == tok[i + 2] for i in range(len(tok) - 2))
+
+
+def reread_is_better(original: str, reread: str) -> bool:
+    """Is ``reread`` a cleaner reading of the same line than ``original``?
+
+    Strictly fewer tokens that cannot be words, and non-empty.  **Confidence
+    is deliberately not a parameter**: the re-reads that repair the text score
+    *lower* than the garbage they replace (0.723 and 0.574 against 0.755 and
+    0.704 on the measured lines), so any confidence term would reject exactly
+    the repairs worth having.
+
+    Requiring a strict improvement is what keeps the pass safe: a re-read that
+    is merely different - ``I OS`` -> ``SO I``, both clean by this detector -
+    is refused, so the text can never churn sideways on a whim.
+    """
+    if not (reread or "").strip():
+        return False
+    return len(suspicious_tokens(reread)) < len(suspicious_tokens(original))
 
 
 def trustworthy_english(segments: Sequence[Any]) -> List[Any]:

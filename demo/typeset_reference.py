@@ -59,6 +59,7 @@ from glasstranslate.core.types import Rect, Segment  # noqa: E402
 from glasstranslate.render import build_blocks  # noqa: E402
 from glasstranslate.render.layout import TextBlock  # noqa: E402
 import typeset_dev as TD  # noqa: E402
+import corpus_metrics as CM
 
 log = logging.getLogger("typeset_reference")
 
@@ -88,6 +89,11 @@ PAPER_LIGHT = 200  # as render/layout.py: grey above this is light paper...
 PAPER_DARK = 60  # ...and below this is dark paper
 TEXT_PAD = 2  # px around a text box painted as paper when finding the bubble interior
 ENG_MIN_CONFIDENCE = 0.3  # rapidocr score below which an English line is ignored
+ENG_REREAD_PAD = 6  # px around a line's box before it is re-read on its own
+# Renderings tried when re-reading a garbled English line, least invasive
+# first: (upscale, otsu).  2x recovers THEM TO DO and PEOPLE I; the binarised
+# pass is what reaches DON'T I.  See `_reread_line`.
+ENG_REREAD_PASSES = ((2.0, False), (4.0, False), (2.0, True))
 CROP_WIDTH = 300  # review sheet tile width
 SHEET_MAX_HEIGHT = 950  # review sheets stay under 1000 px so a model may view them
 
@@ -548,8 +554,62 @@ def _transform_segments(segments: Sequence[Segment], homography: np.ndarray) -> 
     return out
 
 
+def _reread_line(ocr: Any, eng_bgr: np.ndarray, seg: Segment) -> Optional[str]:
+    """A cleaner reading of one English line, or None to keep what we have.
+
+    The reference page is clean printed Latin, and the recogniser still
+    mangles it: ``THEM TO DO`` comes back as ``THO T TO``, ``SO IN THE`` as
+    ``SON I TS``.  The cause is scale, not language - setting
+    ``Rec.lang_type`` to ``en`` gives byte-identical output on every line of a
+    test page, while re-reading the line's own crop at 2x returns
+    ``THEM TO DO`` at full confidence.
+
+    The crop re-detects as several boxes, so the pieces are ordered by box
+    centre x before joining; taking the engine's own order gives
+    ``THE sO IN`` where sorting gives ``sO IN THE``.
+
+    Three renderings are tried and the least garbled wins, but the result is
+    only offered when it beats the original on
+    :func:`corpus_metrics.reread_is_better` - strictly fewer tokens that
+    cannot be words.  So the pass can only ever reduce garbage, and a line the
+    detector is already happy with is never touched (which is also what keeps
+    it cheap: it fires on about one line in fifty)."""
+    if not CM.suspicious_tokens(seg.text):
+        return None
+    quad = np.asarray(seg.quad, dtype=np.float32)
+    h, w = eng_bgr.shape[:2]
+    x0 = max(0, int(quad[:, 0].min()) - ENG_REREAD_PAD)
+    y0 = max(0, int(quad[:, 1].min()) - ENG_REREAD_PAD)
+    x1 = min(w, int(quad[:, 0].max()) + ENG_REREAD_PAD)
+    y1 = min(h, int(quad[:, 1].max()) + ENG_REREAD_PAD)
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    crop = eng_bgr[y0:y1, x0:x1]
+
+    best: Optional[str] = None
+    best_bad = len(CM.suspicious_tokens(seg.text))
+    for scale, otsu in ENG_REREAD_PASSES:
+        img = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        if otsu:
+            grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            _, binar = cv2.threshold(grey, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            img = cv2.cvtColor(binar, cv2.COLOR_GRAY2BGR)
+        lines = ocr.recognize(np.ascontiguousarray(img))
+        if not lines:
+            continue
+        order = sorted(lines, key=lambda s: float(np.asarray(s.quad)[:, 0].mean()))
+        text = " ".join(s.text.strip() for s in order if s.text.strip())
+        bad = len(CM.suspicious_tokens(text))
+        if text.strip() and bad < best_bad:
+            best, best_bad = text, bad
+    return best if best is not None and CM.reread_is_better(seg.text, best) else None
+
+
 def load_english_segments(eng_bgr: np.ndarray, stem: str, refresh: bool, device: str) -> List[Segment]:
-    """OCR lines of the reference scan (its own pixel grid), cached per stem."""
+    """OCR lines of the reference scan (its own pixel grid), cached per stem.
+
+    Lines the lexical detector calls garbled are re-read from their own crop
+    (:func:`_reread_line`) before the cache is written."""
     path = TD.cache_dir(stem) / "eng_segments.pkl"
     if path.exists() and not refresh:
         with path.open("rb") as fh:
@@ -559,10 +619,24 @@ def load_english_segments(eng_bgr: np.ndarray, stem: str, refresh: bool, device:
     ocr = RapidOCREngine(device=device, min_confidence=ENG_MIN_CONFIDENCE)
     ocr.warmup()
     segs = ocr.recognize(eng_bgr)
+
+    repaired = 0
+    out: List[Segment] = []
+    for seg in segs:
+        better = _reread_line(ocr, eng_bgr, seg)
+        if better is None:
+            out.append(seg)
+            continue
+        repaired += 1
+        log.info("English OCR re-read: %r -> %r", seg.text, better)
+        out.append(Segment(text=better, quad=seg.quad, confidence=seg.confidence,
+                           lang_hint=seg.lang_hint))
+    segs = out
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as fh:
         pickle.dump(segs, fh)
-    log.info("English OCR: %d lines cached to %s", len(segs), path)
+    log.info("English OCR: %d lines (%d re-read) cached to %s", len(segs), repaired, path)
     return segs
 
 
