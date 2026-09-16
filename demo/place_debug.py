@@ -40,7 +40,7 @@ def main() -> None:
             continue
         text = text.upper()
         bpath = block_font_path_for(st, text, default_font_path())
-        ts = place.typeset_block(text, st, pil_measurer(bpath))
+        ts = place.typeset_block(text, st, pil_measurer(bpath, condense=True))
         sb = st.search_box
         crop = img[sb.y : sb.y2, sb.x : sb.x2].copy()
         bb = ts.bbox
