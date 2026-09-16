@@ -83,7 +83,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from ..core.types import Rect, SegmentStyle, TranslatedSegment
-from ..render.compose import MANGA_FONT_PATH, block_italic, halo_px, has_cjk, typeset_block, weight_px
+from ..render.compose import (MANGA_FONT_PATH, block_italic, halo_px, needs_cjk_face,
+                              typeset_block, weight_px)
 from ..render.fit import FitResult, Measure, fit_text
 from ..render.style import quad_text_height, quad_text_width
 from ..render.typeset import Typeset
@@ -528,10 +529,11 @@ class GlassOverlay(QWidget):
         if not text:
             return
         # As :func:`compose.compose`: capitals in the comic font, unless the
-        # translation still carries CJK (Anime Ace has no such glyphs): then
+        # translation is substantially CJK (Anime Ace has no such glyphs): then
         # the overlay font, upright and as translated, like the PIL renderer's
-        # CJK system-font fallback.
-        cjk = has_cjk(text)
+        # CJK system-font fallback.  The test is a ratio, not `has_cjk`: one
+        # misread ideograph used to re-face a whole balloon into the system sans.
+        cjk = needs_cjk_face(text)
         if self._uppercase and not cjk:
             text = text.upper()
         style = seg.style

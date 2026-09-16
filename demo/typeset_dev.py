@@ -80,7 +80,8 @@ from glasstranslate.core.pipeline import clean_translation  # noqa: E402
 from glasstranslate.core.types import Rect, Segment, StyledSegment, TranslatedSegment  # noqa: E402
 compose_mod = importlib.import_module("glasstranslate.render.compose")  # the package re-exports the function under this name
 from glasstranslate.render import build_blocks  # noqa: E402
-from glasstranslate.render.compose import block_font_path_for, has_cjk, pil_measurer  # noqa: E402
+from glasstranslate.render.compose import (block_font_path_for,  # noqa: E402
+                                           needs_cjk_face, pil_measurer)
 from glasstranslate.render.layout import TextBlock  # noqa: E402
 from glasstranslate.render import selfcheck  # noqa: E402
 
@@ -531,7 +532,7 @@ def run_page(args: argparse.Namespace, image: Path, out_dir: Path) -> int:
         st = b.style
         kind = block_kind(b)
         text = seg.translation.strip()
-        if not args.no_upper and not has_cjk(text):
+        if not args.no_upper and not needs_cjk_face(text):
             text = text.upper()
         size_s, n_s, box_s = "-", "-", "-"
         ts = None
