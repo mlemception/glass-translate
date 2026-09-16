@@ -537,6 +537,9 @@ def run_page(args: argparse.Namespace, image: Path, out_dir: Path) -> int:
         ts = None
         if not seg.untranslated and text and st.layout_box is not None:
             bpath = block_font_path_for(st, text, compose_mod.default_font_path())
+            # Same fold the renderer applies, so the record and the pixels agree about
+            # what was actually lettered (compose._draw_block folds before measuring).
+            text = compose_mod.fold_to_face(text, bpath)
             try:
                 ts = compose_mod.typeset_block(text, st, pil_measurer(bpath), lang=args.tgt)
                 bb = ts.bbox
