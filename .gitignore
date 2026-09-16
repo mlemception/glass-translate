@@ -35,3 +35,6 @@ renderer/.venv/
 # already tracked: the files committed before this rule existed are still in the index.)
 /demo/reference/
 /demo/cache/
+
+# per-cycle renders of before.png written by the development (docs/NOTES.md)
+/incremental/
