@@ -103,6 +103,88 @@ def block_font_path_for(style: SegmentStyle, text: str, fallback: Optional[str])
     return manga_font_path(block_italic(style)) or fallback
 
 
+# Punctuation the comic face has no glyph for, and what a letterer sets instead.
+# Anything not listed falls through to a compatibility fold, then to deletion.
+_FOLD_TABLE = {
+    "•": "-",     # BULLET
+    "‣": "-",     # TRIANGULAR BULLET
+    "●": "-",     # BLACK CIRCLE
+    "·": "-",     # MIDDLE DOT (absent from the face too)
+    "—": "--",    # EM DASH
+    "–": "-",     # EN DASH
+    "−": "-",     # MINUS SIGN
+    # Latin letters with a stroke: no compatibility decomposition, so the fold below
+    # cannot reach them and they would be dropped outright.
+    "Ł": "L", "ł": "l",   # L WITH STROKE
+    "Ø": "O", "ø": "o",   # O WITH STROKE
+    "Đ": "D", "đ": "d",   # D WITH STROKE
+}
+
+_PROBE_PX = 32
+# A private-use codepoint no real face carries: its bitmap IS ``.notdef``.
+_NOTDEF_PROBE = ""
+
+
+@lru_cache(maxsize=8)
+def _notdef_signature(font_path: str) -> tuple:
+    mask = _load_font(font_path, _PROBE_PX).getmask(_NOTDEF_PROBE)
+    return (mask.size, bytes(mask))
+
+
+@lru_cache(maxsize=4096)
+def _renders(font_path: str, ch: str) -> bool:
+    """Whether ``font_path`` has a real glyph for ``ch``.
+
+    FreeType maps an absent codepoint to ``.notdef``, so a character whose bitmap
+    matches the private-use probe's is missing.  Cached per face and character: the
+    cost is one rasterised glyph the first time a character is ever seen.
+    """
+    if ch.isspace():
+        return True
+    try:
+        mask = _load_font(font_path, _PROBE_PX).getmask(ch)
+        return (mask.size, bytes(mask)) != _notdef_signature(font_path)
+    except Exception:
+        return False
+
+
+def unrenderable_chars(text: str, font_path: Optional[str]) -> List[str]:
+    """The characters of ``text`` that ``font_path`` would draw as a tofu box."""
+    if not font_path:
+        return []
+    return [ch for ch in text if not _renders(font_path, ch)]
+
+
+def fold_to_face(text: str, font_path: Optional[str]) -> str:
+    """Rewrite ``text`` so every character has a glyph in ``font_path``.
+
+    A ``.notdef`` box is strictly worse on the page than any reasonable substitute, so
+    each missing character is, in order: looked up in :data:`_FOLD_TABLE`; decomposed
+    and stripped of its combining marks, which turns accented Latin into its base
+    letter; and failing both, dropped.
+
+    Called before the text is measured, so line breaking and drawing agree.  Note this
+    is a *substitution*, not per-character font fallback -- drawing one bullet from the
+    system face would mean threading a second font through measurement and layout.
+    """
+    if not font_path or not text:
+        return text
+    if not unrenderable_chars(text, font_path):
+        return text
+    out = []
+    for ch in text:
+        if _renders(font_path, ch):
+            out.append(ch)
+            continue
+        sub = _FOLD_TABLE.get(ch)
+        if sub is None:
+            decomposed = unicodedata.normalize("NFKD", ch)
+            sub = "".join(c for c in decomposed if not unicodedata.combining(c))
+        if sub and sub != ch and not unrenderable_chars(sub, font_path):
+            out.append(sub)
+    return "".join(out)
+
+
 @lru_cache(maxsize=256)
 def _load_font(font_path: Optional[str], size_px: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
     if font_path:
@@ -263,6 +345,9 @@ def _draw_block(
         return
     if uppercase and not has_cjk(text):
         text = text.upper()
+    text = fold_to_face(text, font_path)
+    if not text:
+        return
     ts = typeset_block(text, style, measure, lang=seg.tgt_lang or "en")
     if not ts.lines:
         return
@@ -406,7 +491,7 @@ def compose(
         style = seg.style
         if hide_original:
             draw.polygon([tuple(p) for p in quad.tolist()], fill=(*style.bg, 255))
-        text = seg.translation.strip()
+        text = fold_to_face(seg.translation.strip(), path)
         if not text:
             continue
         cx, cy = (float(v) for v in quad.mean(axis=0))
