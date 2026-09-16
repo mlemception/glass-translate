@@ -142,3 +142,33 @@ def test_condensing_lets_a_width_bound_block_hold_a_larger_size() -> None:
     fit_condensed = T.fit_text(text, 420, 200, condensed)
     assert fit_condensed.size >= fit_natural.size
     assert (fit_condensed.size, len(fit_condensed.lines)) != (fit_natural.size, len(fit_natural.lines))
+
+
+class _Style:
+    """Only the attribute ``condenses`` reads."""
+
+    def __init__(self, in_bubble: bool) -> None:
+        self.in_bubble = in_bubble
+
+
+def test_only_balloon_dialogue_condenses() -> None:
+    """Free text over artwork has no container to grow safely inside."""
+    assert compose.condenses(_Style(True)) is True
+    assert compose.condenses(_Style(False)) is False
+
+
+def test_a_style_without_the_flag_does_not_condense() -> None:
+    assert compose.condenses(object()) is False
+
+
+def test_condense_false_draws_the_face_at_its_natural_width() -> None:
+    """The opt-out has to actually opt out, or free text still grows."""
+    font = _font()
+    natural = font.getlength(TEXT)
+    ts = Typeset(size=float(SIZE), line_h=80.0, lines=[PlacedLine(TEXT, 700.0, 100.0, natural)])
+    canvas = _canvas()
+    compose.draw_typeset(canvas, ts, font, (0, 0, 0), (255, 255, 255), False, condense=False)
+    box = _ink(canvas)
+    assert box is not None
+    assert (box[2] - box[0]) == pytest.approx(natural, rel=0.03)
+    assert (box[0] + box[2]) / 2.0 == pytest.approx(700.0, abs=2.0)

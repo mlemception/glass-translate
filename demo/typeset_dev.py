@@ -544,7 +544,8 @@ def run_page(args: argparse.Namespace, image: Path, out_dir: Path) -> int:
             try:
                 # condense=True mirrors compose._draw_block, so the recorded size and
                 # line count are the ones actually lettered.
-                ts = compose_mod.typeset_block(text, st, pil_measurer(bpath, condense=True), lang=args.tgt)
+                ts = compose_mod.typeset_block(
+                    text, st, pil_measurer(bpath, condense=compose_mod.condenses(st)), lang=args.tgt)
                 bb = ts.bbox
                 size_s = f"{ts.size:5.1f}"
                 n_s = f"{len(ts.lines):2d}"

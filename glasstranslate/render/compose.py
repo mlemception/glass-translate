@@ -260,9 +260,22 @@ def _measure_cached(font_path: Optional[str], size_px: int, text: str) -> tuple[
 CONDENSE_RATIO = 0.854
 
 
-def _condense_tile(tile: Image.Image) -> Image.Image:
+def condenses(style) -> bool:
+    """Whether ``style``'s block is condensed.
+
+    Balloon dialogue is; free text over artwork is NOT.  Free text has no
+    container to grow safely inside, so recovering its size walks into panel
+    borders: at the full ratio ``v21_p079_e81a99`` b1 rose from 0.63 to 0.70 of
+    its ceiling and gained a one-pixel panel-border collision, which is a hard
+    invariant.  Balloons grow into their own interior, which the inset already
+    guards.
+    """
+    return bool(getattr(style, "in_bubble", False))
+
+
+def _condense_tile(tile: Image.Image, ratio: float = CONDENSE_RATIO) -> Image.Image:
     """``tile`` squeezed horizontally about its own centre."""
-    w = max(1, int(round(tile.width * CONDENSE_RATIO)))
+    w = max(1, int(round(tile.width * ratio)))
     if w == tile.width:
         return tile
     return tile.resize((w, tile.height), Image.Resampling.LANCZOS)
@@ -292,6 +305,7 @@ def _blit_condensed(
     fill: tuple[int, int, int, int],
     stroke_width: int = 0,
     stroke_fill: Optional[tuple[int, int, int, int]] = None,
+    ratio: float = CONDENSE_RATIO,
 ) -> None:
     """Draw ``text`` condensed, centred on ``cx`` with its top at ``top``.
 
@@ -306,7 +320,7 @@ def _blit_condensed(
     tile = Image.new("RGBA", (max(1, int(natural) + 1 + 2 * pad), ascent + descent + 2 * pad), (0, 0, 0, 0))
     ImageDraw.Draw(tile).text((pad, pad), text, font=font, fill=fill,
                               stroke_width=stroke_width, stroke_fill=stroke_fill)
-    tile = _condense_tile(tile)
+    tile = _condense_tile(tile, ratio)
     _composite_clipped(target, tile, int(round(cx - tile.width / 2.0)), int(round(top - pad)))
 
 
@@ -453,7 +467,7 @@ def _draw_block(
     box = style.layout_box
     assert box is not None
     if abs(style.angle_deg) < 0.5:
-        draw_typeset(canvas, ts, font, style.fg, style.bg, style.outline)
+        draw_typeset(canvas, ts, font, style.fg, style.bg, style.outline, condense=condenses(style))
         return
     # Angled block: draw into a layer covering the layout box and the placed
     # lines, rotate it about the layout box centre.
@@ -463,7 +477,8 @@ def _draw_block(
         pad = halo_px(ts.size) + weight_px(ts.size) + 2
         ext = ext.union(Rect(bb.x - pad, bb.y - pad, bb.w + 2 * pad, bb.h + 2 * pad))
     layer = Image.new("RGBA", (max(1, ext.w), max(1, ext.h)), (0, 0, 0, 0))
-    draw_typeset(layer, ts, font, style.fg, style.bg, style.outline, dx=ext.x, dy=ext.y)
+    draw_typeset(layer, ts, font, style.fg, style.bg, style.outline, dx=ext.x, dy=ext.y,
+                 condense=condenses(style))
     cx, cy = box.x + box.w / 2.0, box.y + box.h / 2.0
     # The layer is centred on ``ext``; rotate about the layout box centre.
     _paste_rotated_about(canvas, layer, style.angle_deg, ext.x + ext.w / 2.0, ext.y + ext.h / 2.0, cx, cy)
@@ -489,6 +504,7 @@ def draw_typeset(
     *,
     dx: float = 0.0,
     dy: float = 0.0,
+    condense: bool = True,
 ) -> None:
     """Draw the placed lines of ``ts`` onto ``target``, offset by ``(-dx, -dy)``.
     Two passes: first the rounded paper-coloured halo of every line (only
@@ -501,14 +517,15 @@ def draw_typeset(
     so the lines are positioned by their centre ``cx`` rather than by a left
     edge derived from a width the glyphs no longer have."""
     weight = weight_px(ts.size)
+    ratio = CONDENSE_RATIO if condense else 1.0
     if outline:
         halo = halo_px(ts.size) + weight
         for line in ts.lines:
             _blit_condensed(target, line.text, font, line.cx - dx, line.top - dy,
-                            (*bg, 255), halo, (*bg, 255))
+                            (*bg, 255), halo, (*bg, 255), ratio)
     for line in ts.lines:
         _blit_condensed(target, line.text, font, line.cx - dx, line.top - dy,
-                        (*fg, 255), weight, (*fg, 255) if weight else None)
+                        (*fg, 255), weight, (*fg, 255) if weight else None, ratio)
 
 
 def _paste_rotated_about(
@@ -585,7 +602,8 @@ def compose(
             bpath: Optional[str] = block_font_path
         else:
             bpath = block_font_path_for(seg.style, text, path)
-        _draw_block(canvas, seg, bpath, pil_measurer(bpath, condense=True), hide_original=False, uppercase=uppercase)
+        _draw_block(canvas, seg, bpath, pil_measurer(bpath, condense=condenses(seg.style)),
+                    hide_original=False, uppercase=uppercase)
 
     for seg in plain:
         quad = np.asarray(seg.quad, dtype=np.float64).reshape(4, 2)
