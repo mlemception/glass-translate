@@ -65,7 +65,21 @@ GLYPH_MAX = 1.4  # a component with both sides <= this many glyphs is glyph-size
 GLYPH_MIN = 0.2  # completion candidates must be at least this big (glyphs)
 PIECE_MIN = 0.1  # small pieces collected inside a swept column / furigana strip (glyphs)
 MIN_FILL = 0.18  # ink area / bbox area below which a candidate is a thin diagonal art stroke
-FULL_INSIDE = 0.8  # fraction of a component inside the boxes that makes it a glyph outright
+# Fraction of a component inside the OCR boxes that makes it a glyph outright,
+# bypassing the glyph-size test.  A big hatching mass that the text sits on top
+# of is mostly-but-not-entirely inside the box, so at 0.8 it was claimed whole.
+#
+# A CLIFF, not a curve, measured over the six worst-damaged corpus pages: the
+# artwork we destroy falls 43.7 % -> 41.5 % at 0.9 and then does not move at all
+# at 0.95 or 0.99.  2.2 points is the whole of it, and the other three
+# classification levers give nothing - SOLID_DT 3.0 -> 2.0 is 0.0 points,
+# NEAR_ART 3 -> 6 is 0.1, and GLYPH_MAX 1.4 -> 1.1 is measurably WORSE (44.1 %)
+# and costs recall, so it is not a conservatism knob.  Recall is unchanged here
+# (0.921 -> 0.920) and precision rises 0.657 -> 0.662.
+#
+# Classification tuning is exhausted at this point.  What remains is restoring
+# line work rather than keeping it, which is inpainting - the sidecar's job.
+FULL_INSIDE = 0.9
 NEAR_ART = 3  # px: pieces this close to art (big components) are art fragments, not glyphs
 # Hatching rescue.  A broken speed line inside an OCR box is glyph-sized, partly
 # inside and not touching the border, so the free-text branch of `_classify`
