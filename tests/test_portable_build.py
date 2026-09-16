@@ -865,3 +865,42 @@ def test_collect_distributions_reads_the_current_interpreter() -> None:
     sample: Optional[Dict[str, Any]] = next((d for d in dists if d["name"].lower() == "pytest"), None)
     assert sample is not None
     assert sample["version"] and isinstance(sample["modules"], list)
+
+
+# --------------------------------------------------------- bundled font notices
+# The faces are compiled into the exe by tools/build_resources.py, so pip
+# metadata never sees them and the licence index used to omit them entirely.
+# Anime Ace's terms require its notice to travel with the font.
+
+
+def _index_text(tmp_path: Path) -> str:
+    licenses.write_license_index(tmp_path, [], [], ROOT / "renderer" / "MODELS.md")
+    return (tmp_path / "licenses" / "LICENSES.md").read_text(encoding="utf-8")
+
+
+def test_the_licence_index_ships_every_bundled_font_notice(tmp_path: Path):
+    text = _index_text(tmp_path)
+    for font in licenses.FONT_NOTICES:
+        source = ROOT / str(font["source"])
+        src_path = Path(str(font["source"]))
+        shipped = tmp_path / "licenses" / "fonts" / f"{src_path.parent.name}-{src_path.name}"
+        assert shipped.is_file(), f"{font['family']} ships without its notice"
+        assert shipped.read_bytes() == source.read_bytes(), "the notice must be verbatim"
+        assert font["family"] in text
+        assert shipped.name in text
+
+
+def test_a_missing_font_notice_fails_the_build(tmp_path: Path, monkeypatch):
+    """Shipping the font bare is a licence breach, so the build must stop."""
+    broken = ({**licenses.FONT_NOTICES[0], "source": "glasstranslate/render/fonts/nope.txt"},)
+    monkeypatch.setattr(licenses, "FONT_NOTICES", broken)
+    with pytest.raises(licenses.LicenceError, match="font notice missing"):
+        licenses.write_license_index(tmp_path, [], [], ROOT / "renderer" / "MODELS.md")
+
+
+def test_font_notices_covers_every_face_compiled_into_the_exe():
+    """A face added to the qrc without a notice entry fails here."""
+    from tools import build_resources
+
+    listed = {name for font in licenses.FONT_NOTICES for name in font["files"]}
+    assert listed == set(build_resources.FONT_FILES)

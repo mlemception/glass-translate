@@ -27,6 +27,7 @@ __all__ = [
     "BUILD_ONLY",
     "LicenceError",
     "MAX_LICENCE_FIELD_CHARS",
+    "FONT_NOTICES",
     "bundled_distributions",
     "classify",
     "collect_distributions",
@@ -369,6 +370,45 @@ def canonical_lgpl_text(dists: Sequence[Dist]) -> str:
     )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+# The lettering faces are compiled into the exe by ``tools/build_resources.py``
+# (``:/fonts/``), so they never appear as a distribution and pip metadata cannot
+# see them.  Anime Ace carries a notice the licence requires to travel with the
+# font - "never with this text file missing" - so the build copies it in and
+# fails when it is absent rather than shipping the font bare.
+FONT_NOTICES: Sequence[Mapping[str, Any]] = (
+    {
+        "family": "Anime Ace 2.0 BB",
+        "files": ("animeace2_reg.ttf", "animeace2_ital.ttf"),
+        "licence": "Blambot free comic font licence",
+        "source": "glasstranslate/render/fonts/animeace/font info.txt",
+        "note": "(c) 2006 Nate Piekos. Free for independent comic and non-profit use; "
+                "commercial or mainstream-publisher use needs a licence from the designer.",
+    },
+)
+
+
+def _fonts_table(out_dir: Path) -> List[str]:
+    """Copy each bundled face's notice into ``licenses/fonts/`` and list it."""
+    lines = ["| Face | Files | Licence | Notice |", "|---|---|---|---|"]
+    dest_dir = out_dir / "fonts"
+    for font in FONT_NOTICES:
+        source = ROOT / str(font["source"])
+        if not source.is_file():
+            raise LicenceError(
+                f"font notice missing: {font['source']} must ship with {font['family']}"
+            )
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        src_path = Path(str(font["source"]))
+        name = f"{src_path.parent.name}-{src_path.name}"
+        (dest_dir / name).write_bytes(source.read_bytes())
+        files = ", ".join(f"`{f}`" for f in font["files"])
+        lines.append(f"| {font['family']} | {files} | {font['licence']} | `fonts/{name}` |")
+        lines.append(f"| | | | {font['note']} |")
+    return lines
+
+
 def _dist_table(out_dir: Path, dists: Sequence[Dist]) -> List[str]:
     lines = ["| Package | Version | Licence | Note | Texts |", "|---|---|---|---|---|"]
     for dist in dists:
@@ -477,6 +517,10 @@ def write_license_index(
         "## 1. GlassTranslate.exe",
         "",
         *_dist_table(out_dir, app_dists),
+        "",
+        "### 1a. Lettering faces compiled into the exe",
+        "",
+        *_fonts_table(out_dir),
         "",
         "## 2. renderer\\glassrenderer.exe (the quality sidecar)",
         "",
