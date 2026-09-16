@@ -128,3 +128,51 @@ def test_a_bullet_draws_the_same_pixels_as_the_hyphen_it_folds_to() -> None:
 
 def test_an_accent_draws_the_same_pixels_as_its_base_letter() -> None:
     assert np.array_equal(_draw("ĆAT"), _draw("CAT"))
+
+
+# --- Cycle 3: one stray glyph must not re-face a whole block --------------------
+
+MOSTLY_LATIN = "兴 THEY SAY MEN-ARE WOLVES, BUT..."   # 1 ideograph in 33 chars
+GENUINELY_CJK = "それはきっと天使に"
+
+
+def test_has_cjk_still_reports_any_cjk_at_all() -> None:
+    """The primitive is unchanged; only the face decision moves off it."""
+    assert compose.has_cjk(MOSTLY_LATIN)
+    assert compose.has_cjk(GENUINELY_CJK)
+    assert not compose.has_cjk("PLAIN ENGLISH")
+
+
+def test_one_stray_ideograph_does_not_claim_the_cjk_face() -> None:
+    """The regression: 1 CJK character in 33 used to re-face the whole block."""
+    assert not compose.needs_cjk_face(MOSTLY_LATIN)
+
+
+def test_genuine_cjk_still_takes_the_cjk_face() -> None:
+    assert compose.needs_cjk_face(GENUINELY_CJK)
+
+
+def test_an_evenly_split_block_stays_on_the_fallback() -> None:
+    """Deliberately conservative: at the threshold we do not move the block."""
+    assert compose.needs_cjk_face("A二")
+
+
+def test_whitespace_does_not_dilute_the_ratio() -> None:
+    assert compose.needs_cjk_face("天使   天使")
+    assert not compose.needs_cjk_face("")
+
+
+def test_the_face_chosen_for_a_mostly_latin_block_is_the_comic_one() -> None:
+    style = SegmentStyle(fg=(0, 0, 0), bg=(255, 255, 255), angle_deg=0.0, vertical=False,
+                         text_height_px=18.0, layout_box=Rect(10, 10, 200, 80), max_font_px=18.0)
+    assert compose.block_font_path_for(style, MOSTLY_LATIN, "FALLBACK.ttf") == \
+        compose.manga_font_path(False)
+    assert compose.block_font_path_for(style, GENUINELY_CJK, "FALLBACK.ttf") == "FALLBACK.ttf"
+
+
+def test_the_stray_ideograph_is_then_dropped_rather_than_drawn_as_tofu() -> None:
+    """Composes with the fold: the comic face cannot draw it, so it goes."""
+    folded = compose.fold_to_face(MOSTLY_LATIN, compose.MANGA_FONT_PATH)
+    assert "兴" not in folded
+    assert folded.strip().startswith("THEY SAY")
+    assert compose.unrenderable_chars(folded, compose.MANGA_FONT_PATH) == []

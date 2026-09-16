@@ -68,10 +68,39 @@ def manga_font_path(italic: bool = False) -> Optional[str]:
     return MANGA_FONT_PATH if os.path.exists(MANGA_FONT_PATH) else None
 
 
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return 0x2E80 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF or 0xFF00 <= o <= 0xFFEF
+
+
 def has_cjk(text: str) -> bool:
     """True when ``text`` contains CJK ideographs or kana (which the bundled
     comic font cannot draw; such blocks use the CJK system font instead)."""
-    return any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF or 0xFF00 <= ord(c) <= 0xFFEF for c in text)
+    return any(_is_cjk(c) for c in text)
+
+
+# A block is lettered in the CJK system face only once CJK is at least this share of
+# its visible characters.  Deliberately conservative: an evenly split block stays on
+# the fallback, so only the clearly-Latin cases move.
+_CJK_FACE_MIN_RATIO = 0.5
+
+
+def needs_cjk_face(text: str) -> bool:
+    """Whether a block is CJK *text*, as opposed to Latin text carrying a stray glyph.
+
+    Not :func:`has_cjk`.  Choosing the face on "contains any CJK at all" meant a single
+    misread ideograph re-faced a whole balloon into the system sans -- costing it its
+    typeface, its weight and its apostrophe shape over one character.  Measured on the
+    corpus: of the three blocks routed to the fallback, two were 4 % and 12 % CJK and
+    the stray character was OCR noise in both.
+
+    A mostly-Latin block therefore keeps the comic face, and :func:`fold_to_face` drops
+    the leftover ideograph, which has no glyph there and no compatibility decomposition.
+    """
+    visible = [c for c in text if not c.isspace()]
+    if not visible:
+        return False
+    return sum(1 for c in visible if _is_cjk(c)) / len(visible) >= _CJK_FACE_MIN_RATIO
 
 
 def block_italic(style: SegmentStyle) -> bool:
@@ -98,7 +127,7 @@ def block_italic(style: SegmentStyle) -> bool:
 def block_font_path_for(style: SegmentStyle, text: str, fallback: Optional[str]) -> Optional[str]:
     """Font file for one block's translation: the comic font (italic for
     dialogue) unless the text still contains CJK, then ``fallback``."""
-    if has_cjk(text):
+    if needs_cjk_face(text):
         return fallback
     return manga_font_path(block_italic(style)) or fallback
 
@@ -343,7 +372,7 @@ def _draw_block(
     text = seg.translation.strip()
     if not text:
         return
-    if uppercase and not has_cjk(text):
+    if uppercase and not needs_cjk_face(text):
         text = text.upper()
     text = fold_to_face(text, font_path)
     if not text:
@@ -480,7 +509,7 @@ def compose(
                 canvas.paste(patch, (r.x, r.y))
     for seg in blocks:
         text = seg.translation.strip()
-        if block_font_path is not None and not has_cjk(text):
+        if block_font_path is not None and not needs_cjk_face(text):
             bpath: Optional[str] = block_font_path
         else:
             bpath = block_font_path_for(seg.style, text, path)
