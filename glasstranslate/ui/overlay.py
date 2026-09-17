@@ -83,7 +83,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from ..core.types import Rect, SegmentStyle, TranslatedSegment
-from ..render.compose import (MANGA_FONT_PATH, block_italic, halo_px, needs_cjk_face,
+from ..render.compose import (MANGA_FONT_PATH, block_italic, condenses, halo_px, needs_cjk_face,
                               typeset_block, weight_px)
 from ..render.fit import FitResult, Measure, fit_text
 from ..render.style import quad_text_height, quad_text_width
@@ -198,18 +198,40 @@ def load_manga_font() -> Optional[str]:
     return _manga_font_family
 
 
-def make_font(family: str, size: float, *, bold: bool = False, italic: bool = False) -> QFont:
+# Horizontal stretch, in per cent, for condensed balloon lettering - the Qt
+# equivalent of ``compose.CONDENSE_RATIO`` (0.854).  Measured offscreen against
+# the bundled ``animeace2_reg.ttf``: at 85 the DRAWN ink is 0.8503 of full width,
+# so the two renderers agree to 0.4 %, and the drawn ink HEIGHT ratio is exactly
+# 1.0000 because Qt transforms outlines rather than resampling.  That last part
+# is what the PIL route never got - supersampling before the squeeze shifted
+# glyph height 19 px -> 23 px and corrupted the cap measurement the layout is
+# judged on.  ``QFontMetricsF`` and the drawn ink agree to 0.02 %, so measuring
+# and drawing stay consistent with no second measurement path.
+CONDENSED_STRETCH = 85
+
+
+def make_font(family: str, size: float, *, bold: bool = False, italic: bool = False,
+              condensed: bool = False) -> QFont:
     """A ``family`` font at ``size`` pixels, unhinted so glyph advances scale
-    linearly with size (the flow algorithm relies on that)."""
+    linearly with size (the flow algorithm relies on that).
+
+    ``condensed`` squeezes the glyphs to :data:`CONDENSED_STRETCH` per cent, as
+    ``compose`` does for balloon dialogue.  Whoever measures a block must pass
+    the same flag as whoever draws it, or the layout is computed against widths
+    the painter will not produce - :func:`qt_measurer` takes it for that reason.
+    """
     font = QFont(family)
     font.setPixelSize(max(1, int(round(size))))
     font.setBold(bold)
     font.setItalic(italic)
+    if condensed:
+        font.setStretch(CONDENSED_STRETCH)
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     return font
 
 
-def qt_measurer(family: str, *, bold: bool = False, italic: bool = False) -> Measure:
+def qt_measurer(family: str, *, bold: bool = False, italic: bool = False,
+                condensed: bool = False) -> Measure:
     """A :data:`~glasstranslate.render.fit.Measure` for ``family`` based on
     ``QFontMetricsF``: ``(horizontal advance, ascent + descent)`` like
     :func:`glasstranslate.render.compose.pil_measurer`, so the shared
@@ -224,7 +246,7 @@ def qt_measurer(family: str, *, bold: bool = False, italic: bool = False) -> Mea
         px = max(1, int(round(size)))
         fm = cache.get(px)
         if fm is None:
-            fm = QFontMetricsF(make_font(family, px, bold=bold, italic=italic))
+            fm = QFontMetricsF(make_font(family, px, bold=bold, italic=italic, condensed=condensed))
             cache[px] = fm
         return fm
 
@@ -292,6 +314,12 @@ class GlassOverlay(QWidget):
         self._block_family = load_manga_font() or self._font_family
         self._block_measure: Measure = qt_measurer(self._block_family)
         self._block_measure_italic: Measure = qt_measurer(self._block_family, italic=True)
+        # A measurer caches one font per size, so condensed lettering needs its own:
+        # the block is laid out against the widths the painter will actually draw.
+        self._measure_condensed: Measure = qt_measurer(self._font_family, condensed=True)
+        self._block_measure_condensed: Measure = qt_measurer(self._block_family, condensed=True)
+        self._block_measure_italic_condensed: Measure = qt_measurer(
+            self._block_family, italic=True, condensed=True)
         # Typeset results and rendered lettering layers per segment index;
         # laying a block out means a search over sizes and boxes and stroking
         # its outlines is slow, so both are done once per result, not on
@@ -539,12 +567,19 @@ class GlassOverlay(QWidget):
         style = seg.style
         italic = block_italic(style) and not cjk
         family = self._font_family if cjk else self._block_family
+        # Balloon dialogue is condensed, free text over artwork is NOT: the gate is
+        # ``compose.condenses`` itself, not a copy of it, so both renderers letter
+        # the same blocks the same way.  Free text has no container to grow safely
+        # inside, and condensing it walked a block into a panel border.
+        condensed = condenses(style)
         ts = self._typesets.get(index) if index >= 0 else None
         if ts is None:
             if cjk:
-                measure = self._measure
+                measure = self._measure_condensed if condensed else self._measure
+            elif italic:
+                measure = self._block_measure_italic_condensed if condensed else self._block_measure_italic
             else:
-                measure = self._block_measure_italic if italic else self._block_measure
+                measure = self._block_measure_condensed if condensed else self._block_measure
             ts = typeset_block(text, style, measure, lang=seg.tgt_lang or "en")
             if index >= 0:
                 self._typesets[index] = ts
@@ -552,7 +587,7 @@ class GlassOverlay(QWidget):
             return
         # Dialogue (vertical source text) is italic like printed comics;
         # horizontal captions such as chapter titles stay upright.
-        font = make_font(family, ts.size, italic=italic)
+        font = make_font(family, ts.size, italic=italic, condensed=condensed)
         layer = self._layers.get(index) if index >= 0 else None
         if layer is None:
             layer = self._render_layer(ts, font, style)
