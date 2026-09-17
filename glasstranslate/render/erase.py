@@ -889,16 +889,19 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
     own = _paint((h, w), ctx.main + ctx.furi, PAD)
     zone_pad = max(PAD, int(round(BUBBLE_ZONE_EM * max(ctx.glyph, 1.0))))
     zone = _paint((h, w), ctx.main + ctx.furi, zone_pad)
-    # The outline candidates.  A component mostly inside the block's own text
-    # boxes is that block's lettering, not the balloon's edge: on dark paper the
-    # ink mask selects light pixels, so a column of glyphs joins into one
-    # component the length of the column and clears OUTLINE_MIN on its own.
-    # Carving it below would punch the lettering back out of the paper map and
-    # leave the interior a handful of specks between the strokes.
+    # The outline candidates, and the ones the paper map is carved with.  A
+    # component mostly inside the block's own text boxes is that block's
+    # lettering, not the balloon's edge: on dark paper the ink mask selects
+    # light pixels, so a column of glyphs joins into one component the length of
+    # the column and clears OUTLINE_MIN on its own.  Carving it would punch the
+    # lettering back out of the paper map and leave the interior a handful of
+    # specks between the strokes.  It is dropped from the CARVE only: `big`
+    # still carries it into the outline test below, so a box that overlaps a
+    # real edge cannot cost that edge its protection.
     big = comps.maxdim >= OUTLINE_MIN * min(h, w)
-    big &= _fraction_inside(comps.labels, own, comps.area) < OUTLINE_IN_TEXT
     big[0] = False
-    big_mask = comps.mask_of(big)
+    lettering = _fraction_inside(comps.labels, own, comps.area) >= OUTLINE_IN_TEXT
+    big_mask = comps.mask_of(big & ~lettering)
 
     # Paper component the text sits on: text boxes painted over (glyphs count as
     # paper), but never the outline, even where a box overlaps it.
