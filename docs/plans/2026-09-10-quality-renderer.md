@@ -1,6 +1,6 @@
 # Quality renderer: bubble redraw + generative free-text fill — 2026-09-10
 
-Staged plan for the `the request` request "replace the heuristic text erasure with a generative
+Staged plan for the request "replace the heuristic text erasure with a generative
 quality renderer".  Tier: **large** (new sidecar package with its own venv and external deps, a
 localhost protocol, render-pipeline changes in both renderers, an Engines-page setting, model
 downloads, and a new measurement harness).  GATE 1 was auto-approved in the request; the only
@@ -71,14 +71,14 @@ block's `clean_patch` through the existing patch cache).
 | 1c | Metrics: erase IoU, art-kept ratio, SSIM in erased regions, bubble inset / size ratio / centring / overflow / collisions; per page and per block tables | `demo/typeset_metrics.py` | `tests/test_typeset_metrics.py` (synthetic renders with known scores) |
 | 1d | Baseline of the current eraser on all five pages + failure catalogue | `docs/perf/2026-09-10-typesetting-baseline.md` | — |
 | 2 | Bubble redraw (tests first: round, oval, joined, jagged, thought, tailed, dark paper) | `render/erase.py`, `tests/test_erase.py` | red → green |
-| 3a | Model / licence research (one workflow, ≤ 4 agents, Opus) | `renderer/MODELS.md` | — |
+| 3a | Model / licence research | `renderer/MODELS.md` | — |
 | 3b | Sidecar package, protocol, fake-model mode | `renderer/glassrenderer/{server,protocol,fake,compositing}.py`, `renderer/requirements.txt`, `renderer/install.bat` | `renderer/tests/` + `tests/test_quality_protocol.py` (fake mode, no GPU) |
 | 3c | Real stages: LaMa, SDXL img2img + line-art ControlNet, compositing; one opt-in GPU integration test | `renderer/glassrenderer/stages/*.py` | `renderer/tests/test_gpu_integration.py` (`GT_GPU_TESTS=1`) |
 | 4 | App integration: launch + health, per-panel jobs, patch swap (PIL + overlay), Engines setting, model download, graceful fallback | `render/quality.py`, `core/pipeline.py`, `ui/overlay.py`, `config/settings.py`, `ui/bridge_fields.py`, `ui/control_bridge.py`, `ui/download_workers.py`, `ui/qml/pages/EnginesPage.qml`, `packaging/GlassTranslate.spec` | `tests/test_quality_*.py`, bridge / qml tests |
 | 5 | Tune denoise, steps, context, ControlNet weight against the metrics on the four pairs; `before.jpg` free text must not regress | `renderer/glassrenderer/params.py`, `docs/perf/2026-09-10-quality-renderer.md` | — |
 | 6 | Verify: full suite, harness + metrics on five pages before/after, Qt/PIL parity, timing table, exe build + smoke with the sidecar absent | — | — |
 | 7 | Reviews (code, python, security, typesetting quality; one verifier per CRITICAL/HIGH) then fixes | — | — |
-| 8 | Docs: this plan, perf tables, README, demo docstrings, `progress.md` | — | — |
+| 8 | Docs: this plan, perf tables, README, demo docstrings | — | — |
 | 9 | GATE 2 | — | — |
 
 ## Timing targets (warm, fp16 CUDA, per panel at 1024 px)
@@ -102,11 +102,11 @@ compilation of the UNet / ControlNet is an optional final slice if these are mis
   kept); seven synthetic kinds + tail + joined tests in `tests/test_erase.py`; 642 tests green.
   Re-measure: identical scores on the five pages (the old eraser already left the interiors of
   these bubbles clean; the first low "recall" was outline-edge scan noise, now judged out).
-- **3a done**: model research (4 agents) in `demo/output/model_research.json`; decisions: manga
+- **3a done**: model research in `demo/output/model_research.json`; decisions: manga
   big-LaMa TorchScript (MIT / Apache-2.0 notice), Illustrious-XL-v1.0 (OpenRAIL++-M), xinsir
   controlnet-union promax (Apache-2.0), sdxl-vae-fp16-fix, torch cu130 for CPython 3.13;
   licences recorded in `renderer/MODELS.md`.  Protocol contract: `renderer/PROTOCOL.md`.
-- **3b, 3c, 4 done** (one workflow, three agents on disjoint files, then integration fixes):
+- **3b, 3c, 4 done** (three passes on disjoint files, then integration fixes):
   `renderer/glassrenderer/` (protocol, loopback server with token / Host / size guards, fake
   stages, compositing with the byte-identity guarantee, pipeline with preload + warm-up off the
   request path; 166 sidecar tests), real stages (`stages/lama.py` TorchScript manga big-LaMa
@@ -182,4 +182,4 @@ compilation of the UNet / ControlNet is an optional final slice if these are mis
   `job_id`.  Refuted: "ControlNet is conditioned on the LaMa output" (the control map has the mask
   blanked, so it is identical either way).  Left as advisories: split `render/quality.py` (935
   lines), a curated sidecar environment, re-hashing all 24 files at SDXL load, the committed
-  pickle caches under `demo/cache/`, `demo/reference/` size (6 MB) — see progress.md.
+  pickle caches under `demo/cache/`, `demo/reference/` size (6 MB).

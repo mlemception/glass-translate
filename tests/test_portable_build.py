@@ -1,4 +1,4 @@
-"""Tests for the portable-bundle build helpers (plan section 3, slice 6).
+"""Tests for the portable-bundle build helpers (plan section 3).
 
 ``packaging/`` is not an importable package (the name collides with the PyPI
 ``packaging`` distribution), so the three modules under test are imported off

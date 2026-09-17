@@ -2,7 +2,7 @@
 
 Five features as thin vertical slices, each independently testable, TDD-driven, ~one commit.
 Baseline: 297 tests green (commit 12f3242). Status: **committed 2026-09-10 at GATE 2**
-(`19ca771` feat + `7d837b1` docs, 603 tests green; see `progress.md` session 5 for the hand-off).
+(`19ca771` feat + `7d837b1` docs, 603 tests green; see `the build notes` session 5 for the hand-off).
 
 Features: (F1) overlay capture mode, (F2) liquid-glass performance, (F3) OCR pipeline
 (manga-ocr primary / PaddleOCR-family fallback), (F4) Gemini translation provider,
@@ -279,7 +279,7 @@ frozen `%LOCALAPPDATA%\GlassTranslate\models`) with a status line, like the Argo
 
 ## D-1 — Docs, packaging, smoke test
 
-* Files: `progress.md` (session entry + exact next steps); `the build notes` (env vars `GEMINI_API_KEY`, `GLASSTRANSLATE_PROFILE`; commands `tools/profile_glass.py`, `tools/ocr_probe.py`); `docs/GLASS_DESIGN.md` (overlay exceptions `set_capture_excluded` + stored-affinity `showEvent`; `Misc` card; `GlassTextArea`; any F2 layer-stack change); `requirements.txt` (`requests`, `jaconv`, ORT runner if F3-1 passes); `packaging/GlassTranslate.spec` (hidden imports; **no** model `collect_data_files`; keep torch/paddle excludes); `packaging/smoke_test.py` (assert Misc card, Gemini card, series field, no key material in report).
+* Files: the build notes (env vars `GEMINI_API_KEY`, `GLASSTRANSLATE_PROFILE`; commands `tools/profile_glass.py`, `tools/ocr_probe.py`); `docs/GLASS_DESIGN.md` (overlay exceptions `set_capture_excluded` + stored-affinity `showEvent`; `Misc` card; `GlassTextArea`; any F2 layer-stack change); `requirements.txt` (`requests`, `jaconv`, ORT runner if F3-1 passes); `packaging/GlassTranslate.spec` (hidden imports; **no** model `collect_data_files`; keep torch/paddle excludes); `packaging/smoke_test.py` (assert Misc card, Gemini card, series field, no key material in report).
 * Tests first: `tests/test_glass_resources.py::test_check_digest_is_current`; `tests/test_frozen_paths.py::test_manga_ocr_models_dir_frozen_branch`; `tests/test_glass_qml.py::test_smoke_report_contains_no_secret_values`.
 * Security: **yes**. Size: M.
 

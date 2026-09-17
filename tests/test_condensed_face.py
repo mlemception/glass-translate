@@ -54,7 +54,7 @@ def _drawn_width(text: str = TEXT, size: int = SIZE) -> float:
 
 
 def test_the_ratio_is_the_measured_gap_to_the_reference() -> None:
-    """6.6 cap-heights against our 7.727 - see the perf doc, cycle 4."""
+    """6.6 cap-heights against our 7.727 - see the typesetting perf notes."""
     assert compose.CONDENSE_RATIO == pytest.approx(6.6 / 7.727, abs=0.002)
     assert 0.8 < compose.CONDENSE_RATIO < 1.0, "below ~0.8 synthetic condensation looks squashed"
 

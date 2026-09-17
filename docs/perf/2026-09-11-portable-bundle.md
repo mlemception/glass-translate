@@ -5,7 +5,7 @@ Machine: Windows 11 Pro 26200, RTX 4080 (16 GB), CUDA driver 591.86, NVMe.  Buil
 `packaging/smoke_test.py --runs portable` (`res.info`) and the build logs under `build/`.
 Plan: `docs/plans/2026-09-11-portable-bundle.md`.
 
-_Status: final for session 9 — every number comes from this session's builds
+_Status: final — every number comes from the builds recorded here
 (`build/renderer-build.json`, `build/portable-build.json`) and the acceptance runs
 (`build/smoke-portable.json`, `build/smoke-portable-final.json`)._
 
@@ -129,7 +129,7 @@ Sandbox `%TEMP%\gt portable ü_<id>\`, root `GlassTranslate-0.2.0\`, then moved 
   waits 5 s, kills, and the sidecar's CUDA teardown (14–19 s, `0xC0000409`) plus the client's
   bounded waits add up.  The smoke report is written before that teardown (the report's
   `aboutToQuit` slot is connected first) and the acceptance run now waits for the processes to
-  end before it moves the folder.  Listed as an advisory in `progress.md`.
+  end before it moves the folder.  Listed as a known advisory.
 * **Two non-obvious teardown facts** are now pinned in the smoke run and worth knowing when
   reading `renderer.log`: after a real job the sidecar needs 14–19 s to exit on stdin EOF or
   `/shutdown` and leaves with `0xC0000409` (CUDA's `DLL_PROCESS_DETACH` under `os._exit`), so

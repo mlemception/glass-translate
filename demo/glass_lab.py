@@ -16,7 +16,7 @@ Examples (Git Bash, always ``PYTHONUTF8=1``)::
 
 Exit codes: 0 ok, 2 QML load error, 4 a QA check failed, 5 watchdog.
 
-The controls agent owns ``glasstranslate/ui/qml/qmldir``.  Until it exists the
+The controls workstream owns ``glasstranslate/ui/qml/qmldir``.  Until it exists the
 lab copies the component directory (and ``demo/glass_lab``) into
 ``demo/output/dev/glass_lab/stage/`` and adds a ``qmldir`` with the single line
 ``singleton Theme 1.0 Theme.qml`` there, so the relative import keeps working.

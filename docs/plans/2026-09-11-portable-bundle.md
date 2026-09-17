@@ -1,9 +1,8 @@
 # Portable offline bundle: app exe + frozen sidecar + every model — 2026-09-11
 
-`the request`, **large** tier (cross-cutting: config paths, sidecar launch, a second
+**Large** tier (cross-cutting: config paths, sidecar launch, a second
 PyInstaller build, two zip artefacts, a new acceptance run in the smoke test).  GATE 1 was waived
-in the request ("the only stop is GATE 2").  Orchestration bound: 8 agents (research 2,
-implementation 3 on disjoint files, review 3).
+in the request ("the only stop is GATE 2").  Work split: research, then implementation on disjoint files, then review.
 
 ## Intake (restated)
 
@@ -93,7 +92,7 @@ machine:
 10. `gh` is not installed on this machine, so the "GitHub code search first" step uses web search
     and the installed `pyinstaller-hooks-contrib` sources instead.
 
-## 2. Contracts between the agents
+## 2. Contracts between the workstreams
 
 ### 2.1 `glasstranslate/config/settings.py` (I1 provides)
 
@@ -167,8 +166,8 @@ dist/<zip>.sha256                # "<hex>  <zip name>"
 | 5 | Sidecar spec + entry + `build_renderer.py/.bat` (measure, prune, closure check, fake self-check) | I3 | `packaging/glassrenderer.spec`, `packaging/glassrenderer_entry.py`, `build_renderer.py`, `build_renderer.bat`, `renderer/tests/test_frozen_entry.py` |
 | 6 | Store verification + Argos discovery + manifest; torch-free archive scan; licence index; `build_portable.py/.bat` | I3 | `packaging/portable_store.py`, `packaging/verify_torch_free.py`, `packaging/licenses.py`, `packaging/README-portable.txt`, `build_portable.py`, `build_portable.bat`, `tests/test_portable_build.py` |
 | 7 | Suites, exe build, renderer build, portable build, smoke `portable` (fake + GPU), perf doc | main loop | `docs/perf/2026-09-11-portable-bundle.md` |
-| 8 | Reviews (code, security, build/packaging) on Opus 5; fix CRITICAL/HIGH | main loop | — |
-| 9 | Docs: README, the build notes, PROTOCOL.md, renderer/README.md, GLASS_DESIGN §5/§6, progress.md | main loop | docs |
+| 8 | Reviews (code, security, build/packaging); fix CRITICAL/HIGH | — | — |
+| 9 | Docs: README, PROTOCOL.md, renderer/README.md, GLASS_DESIGN §5/§6, the build notes | main loop | docs |
 | 10 | GATE 2: diff summary + conventional commit messages | main loop | — |
 
 ## 4. Acceptance (the `portable` smoke run)
@@ -211,12 +210,12 @@ Every slice is implemented, built and verified; the work waits at **GATE 2** (no
   fixed and pinned by tests: `torch.jit.load(str)` cannot open a non-ASCII models path
   (`stages/lama.py` now hands torch a file object), and `feedPage` restarting the pipeline
   crashed the exe with two concurrent DirectML sessions (`Pipeline.replace_capture` swaps the
-  capture in place).  The review round (3 reviewers on Opus: code, security, build/packaging)
+  capture in place).  The review round (three passes: code, security, build/packaging)
   raised 3 HIGH + 15 MEDIUM + 10 LOW; every HIGH and the correctness-relevant MEDIUM/LOW items
   were fixed (non-ASCII page reader, `.gitignore` anchoring, atomic zip writes, portable
   `models_dir` containment, sidecar env hygiene, torch-free gate widening, README template,
   probe watchdog, action bookkeeping, spec closure over delay imports, build preconditions);
-  the rest is listed as advisories in `progress.md`.
-* Decisions taken mid-session with the user: the
+  the rest is listed as advisories in `the build notes`.
+* Decisions taken while building this: the
   bundle is for personal use, so the Sugoi pack ships by default (`--no-research-models`
   for a shareable build).

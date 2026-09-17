@@ -105,7 +105,7 @@ _FLOORED_COMPONENTS = ("c_contain", "c_leftover", "c_centre")
 # identical renders differ in 11 of 188 fields, by at most 0.0052 LPIPS, worth under 0.02
 # in `c_art` on one page.  0.15 is ~4.5x the measured spread: enough headroom for that,
 # small enough that a real slice is visible above it.  Evidence and the reproduction:
-# docs/perf/2026-09-15-typeset-corpus.md.  Tightening this can only make the gate harder
+# the corpus measurements.  Tightening this can only make the gate harder
 # to pass; never raise it to let a regression through.
 TOLERANCE = 0.15
 

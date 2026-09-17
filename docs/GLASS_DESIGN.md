@@ -641,7 +641,7 @@ for free (a ShaderEffect + MouseArea + Text is invisible to Narrator/NVDA). `Acc
   `--check` recomputes that digest and compares it to the header — no rebuild, no byte comparison of
   outputs (mtimes are meaningless after a checkout and rcc/qsb bytes differ across PySide6 versions).
 - Decision: `resources_rc.py` is **gitignored during parallel implementation** (every QML/shader edit
-  would otherwise churn a 100 KB+ generated file owned by another agent). `control.py` imports it and,
+  would otherwise churn a 100 KB+ generated file owned by another workstream). `control.py` imports it and,
   when missing and not frozen, calls `tools.build_resources.build()` once (dev fallback);
   `tests/conftest.py`'s session fixture calls `build()`; `build.py` always calls it; the integration
   owner (§8) commits it once at the end, after which `--check` guards it in CI.
@@ -814,7 +814,7 @@ the CPU-only translation, and that Win+Arrow snapping is unsupported (§1.1).
     on-screen smoke run (§6 run A), gated on grabbed pixels — never on per-item `ShaderEffect.status`.
 - Visual QA: run `python run.py` with `GLASSTRANSLATE_SMOKE_LOG`, take the window grab and an mss
   grab of the same rect; **view only downscaled copies ≤ 1000 px on the long side, JPEG q80, max 8
-  views per agent**; also crop 2× zooms of one corner (rim distortion + specular) and the tab bar
+  views per workstream**; also crop 2× zooms of one corner (rim distortion + specular) and the tab bar
   during a tab switch (frame from a timer) to confirm: rim distortion visible with no fold (mirrored
   content) at the edge, centre calm, edge line = 1 device px, rim still visible over a white desktop,
   no white wash, concentric radii (capsule track / capsule indicator), shadows not borders, no
@@ -845,11 +845,11 @@ the CPU-only translation, and that Win+Arrow snapping is unsupported (§1.1).
   Narrator announces every control by its FormRow label; keyboard-only pass through the tab order.
 
 ## 8. File ownership for parallel implementation
-| agent | owns |
+| workstream | owns |
 |---|---|
 | shaders | `glasstranslate/ui/qml/shaders/*.frag`, `qml/GlassSurface.qml`, `qml/GlassShadow.qml`, `qml/Theme.qml`, `demo/glass_lab.py` (dev harness loading the QML dir from disk over a static PNG backdrop, with a mode switch) |
 | controls | every other file in `glasstranslate/ui/qml/` incl. `Main.qml`, `qmldir`, `pages/` |
 | python | `glasstranslate/ui/control.py`, `glasstranslate/ui/glass/*.py`, `glasstranslate/ui/resources.qrc`, `glasstranslate/ui/icons/app.png` (committed source asset), `glasstranslate/ui/__init__.py` (no change expected; must keep re-exporting `LANGUAGES, ControlWindow`), `tools/build_resources.py`, `overlay.py` (font loading only), `app.py`, `config/settings.py`, `glasstranslate/__init__.py` (`__version__`), `.gitignore` (`dist/`, `build/`, `packaging/glasstranslate.ico`, `glasstranslate/ui/resources_rc.py`), `tests/conftest.py`, `tests/test_glass_*.py` (all new tests use this prefix), `tests/test_frozen_paths.py` |
-| build | `build.py`, `build.bat`, `run.py` (frozen `_MEI*` sweep), `requirements-build.txt`, `packaging/*` (incl. `gt_bundle.marker`), README build section, `docs/ARCHITECTURE.md` (UI paragraph: line 63 still describes `ControlWindow(QMainWindow)`), `progress.md` (final "next steps") |
-| integration | last agent to run: regenerates and commits `glasstranslate/ui/resources_rc.py` (then removes it from `.gitignore`), runs `pytest -q` and `build.py` |
-Shared files are edited by exactly one owner; cross-agent needs go through this document.
+| build | `build.py`, `build.bat`, `run.py` (frozen `_MEI*` sweep), `requirements-build.txt`, `packaging/*` (incl. `gt_bundle.marker`), README build section, `docs/ARCHITECTURE.md` (UI paragraph: line 63 still describes `ControlWindow(QMainWindow)`) |
+| integration | last workstream to land: regenerates and commits `glasstranslate/ui/resources_rc.py` (then removes it from `.gitignore`), runs `pytest -q` and `build.py` |
+Shared files are edited by exactly one owner; cross-workstream needs go through this document.

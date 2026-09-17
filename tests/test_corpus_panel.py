@@ -1,15 +1,15 @@
 """The blind-panel builder's three guards (``demo/corpus_panel.py``).
 
 This tool decides nothing by itself, but every verdict in
-``docs/perf/2026-09-15-typeset-corpus.md`` rests on it, so the things it refuses
+The recorded verdicts rest on it, so the things it refuses
 to do are worth pinning.  Each guard exists because the tool once did the thing:
 
 * it produced a panel of 4 strips across 2 pages without comment, which is below
   the protocol floor and therefore decides nothing;
 * it left 117 KB and 106 KB strips on disk while appearing to enforce a 100 KB
   limit, because it resized *after* its final save;
-* it showed a judge an ``eng_aligned.png`` that did not register with our page,
-  and the judge confidently reported a defect that was an artifact.
+* it showed a reviewer an ``eng_aligned.png`` that did not register with our page,
+  and the review confidently reported a defect that was an artifact.
 
 ``demo`` is not a package, so the module is loaded by path.
 """
@@ -72,7 +72,7 @@ def test_a_panel_with_too_few_blocks_is_not_judgeable():
 
 
 def test_a_panel_without_its_controls_is_not_judgeable():
-    """Controls catch a judge that confabulates a preference between identical images."""
+    """Controls catch a reviewer that confabulates a preference between identical images."""
     chosen = [_rec(f"p{i}", 0) for i in range(6)]
     assert panel.judgeable(chosen, {f"p{i}" for i in range(6)}) is not None
 

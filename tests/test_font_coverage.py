@@ -130,7 +130,7 @@ def test_an_accent_draws_the_same_pixels_as_its_base_letter() -> None:
     assert np.array_equal(_draw("ĆAT"), _draw("CAT"))
 
 
-# --- Cycle 3: one stray glyph must not re-face a whole block --------------------
+# --- one stray glyph must not re-face a whole block --------------------
 
 MOSTLY_LATIN = "兴 THEY SAY MEN-ARE WOLVES, BUT..."   # 1 ideograph in 33 chars
 GENUINELY_CJK = "それはきっと天使に"

@@ -1,11 +1,11 @@
-"""Build a blind A/B panel for one slice, to the protocol in ``docs/NOTES.md``.
+"""Build a blind A/B panel for one change.
 
 Per chosen block this emits one greyscale strip holding three crops of the SAME
 rectangle: the aligned reference, and the two renders **in a randomised order**,
 reseeded per strip.  The key naming which side is which goes to a separate file
 that must not be read until the verdict is recorded.
 
-The protocol this serves, and which this script enforces rather than assumes:
+The protocol it enforces rather than assumes:
 
 * 6-8 affected blocks across **at least 4 pages**, plus **2 controls** - blocks
   the change was not expected to touch, which catch a judge that confabulates a
@@ -24,7 +24,7 @@ Three things it refuses to do, each because it once did them:
   save and gave up after a fixed number of attempts, so it left 117 KB and
   106 KB strips on disk while appearing to enforce the limit.  The loop now
   asserts.
-* **build a panel that cannot be judged.** It once produced 4 strips across 2
+* **build a panel that decides nothing.** It once produced 4 strips across 2
   pages without comment, which is below the protocol floor and therefore
   decides nothing; :func:`main` now exits non-zero and says so.
 
@@ -75,7 +75,7 @@ def registers(page: str) -> bool:
     """Whether this page's reference actually corresponds to our page.
 
     Each strip carries ``eng_aligned.png`` beside it as the ground truth.  On a
-    page whose reference does not register, the judge compares our render
+    page whose reference does not register, the reviewer compares our render
     against *different content* and reports artifacts with confidence.  It did
     exactly that on a 1200x764 half-page whose reference is a 2250x1500 page
     scaled 0.534 onto it: **96.3 %** of that page's kept-art is not ink in our
@@ -83,7 +83,7 @@ def registers(page: str) -> bool:
 
     The stored alignment score does **not** catch this - that page scores 0.894,
     better than pages that register fine - so the floor is measured directly,
-    the same way ``docs/perf/2026-09-15-typeset-corpus.md`` measures it.
+    measured directly.
     """
     try:
         kept = np.asarray(Image.open(CORPUS / "reference" / page / "kept_art.png").convert("L")) > 127

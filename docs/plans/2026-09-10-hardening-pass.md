@@ -49,11 +49,11 @@ runs never made an https request.  Fixes:
 
 ## Reviews
 
-Workflow of four reviewers over the saved diff (code, Python idiom
-and security, plus a pure-move equivalence checker that compared every top-level
+Four review passes over the saved diff (code, Python idiom and security, plus a
+pure-move equivalence checker that compared every top-level
 def/class body of the old `control.py` / `pipeline.py` against the new modules with `ast.dump` and a
 comment-stripped text pass, and imported the facades to assert name identity). **No CRITICAL or HIGH
-findings**, so the adversarial verification stage had nothing to run. Advisory findings and what was
+findings**, so the verification stage had nothing to run. Advisory findings and what was
 done:
 
 | Sev | Finding | Action |

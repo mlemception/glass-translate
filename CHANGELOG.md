@@ -6,10 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.0] - 2026-09-16
 
-Lettering, judged blind. Every slice below was accepted only when a blind comparison of
-the change preferred it, with the two renders unlabelled, their order randomised per
-comparison, and the answer key read afterwards. Two of every eight comparisons were blocks the
-change was not expected to touch, as a check that the judge was not inventing differences.
+Lettering, reviewed blind. Every change below was accepted only on a blind comparison:
+the two renders unlabelled, their order randomised per comparison, and the answer key
+read only afterwards. Two of every eight comparisons were blocks the
+change was not expected to touch, as a check that the comparison was not inventing differences.
 
 ### Changed
 

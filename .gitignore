@@ -6,8 +6,6 @@ models/*.argosmodel
 demo/output/
 .pytest_cache/
 *.egg-info/
-.claude/
-.ecc/
 # build outputs (docs/GLASS_DESIGN.md section 4 / 6)
 dist/
 build/
@@ -31,21 +29,6 @@ renderer/.venv/
 # Ground truth and OCR caches derived from those licensed pages.
 # typeset_reference.derive() writes eng_aligned.png - a full warped copy of the reference
 # page - under demo/reference/<stem>/, and the corpus harness would otherwise stage
-# thousands of them.  Anchored to the repo root.  (Ignoring a path does not untrack what is
-# already tracked: the files committed before this rule existed are still in the index.)
+# thousands of them.  Anchored to the repo root.
 /demo/reference/
 /demo/cache/
-
-# The autonomous-run scaffolding: the method manual, the session hand-off, the cycle-by-cycle
-# lab notebook and the supervisor that drove the run.  Kept locally and never published - it is
-# process rather than project, and the notebook quotes reference text from the licensed corpus.
-# Anchored to the repo root.
-/docs/NOTES.md
-/docs/NOTES.md
-/docs/RUN_COMPLETE
-/docs/perf/2026-09-15-typeset-corpus.md
-/progress.md
-/.mcp.json
-/tools/autorun-mcp/
-# per-cycle renders of before.png written by that run
-/incremental/

@@ -191,7 +191,7 @@ hides regressions in both.
 ## 5. The loop protocol
 
 This is a **manual, repeatable cycle plus one command**. There is deliberately no
-measurement loop.
+long-running measurement loop.
 
 1. Run the fixed sample:
    `.venv\Scripts\python demo\corpus_eval.py --sample 50 --seed 1 --tag <tag>`
