@@ -128,6 +128,21 @@ _OFF_CENTRE_SIZE_COST = 0.1
 # vertical offsets of the same block share one cached flow (conservative:
 # a flow that fits the floored widths fits the real ones).
 _WIDTH_QUANTUM = 2.0
+# How far off the block's axis a line may sit to reach width the strictly
+# centred budget cannot offer (ems of the font size; see :func:`_line_budget`).
+# A balloon drawn around a vertical Japanese column is lopsided about its own
+# optical centre, and the centred budget is then a good deal narrower than the
+# rows really are: over the corpus the symmetric width is 0.98 of the widest
+# row on blocks set at the ceiling but only 0.82 on blocks that had to shrink,
+# so the loss falls precisely on the blocks that could least afford it.  At
+# 0.2 em, 60 of 195 bubble blocks on 28 pages change, 43 of them growing a size
+# step and 6 losing one, total lines fall 788 -> 771 and hyphens 28 -> 21.  The
+# wander it buys back is self-limiting, because a line narrower than its budget
+# is slid back onto the axis: 186 of 195 blocks stay under 2 px, the median
+# among blocks that gained is 0.70 px, and the worst is 3.09 px - against the
+# 7.56 px the symmetric budget was introduced to remove.  Below one
+# ``_WIDTH_QUANTUM`` (0.1 em is ~1.6 px at dialogue size) it does very little.
+_AXIS_SLACK_EM = 0.2
 
 # Hyphenation dictionaries by language.  The only module-level cache in the
 # typesetting path; it is shared by the PIL renderer (pipeline / demo thread)
@@ -332,7 +347,7 @@ def clip_spans(spans: np.ndarray, top: float, rect: Rect) -> Tuple[np.ndarray, f
 
 
 def _line_budget(spans: np.ndarray, top: float, bottom: float, base_y: float,
-                 anchor_x: Optional[float] = None) -> Tuple[float, float]:
+                 anchor_x: Optional[float] = None, slack: float = 0.0) -> Tuple[float, float]:
     """``(width, centre_x)`` available to a line inking rows ``[top, bottom)``
     (absolute y).  The width is the *intersection* of the row spans so every
     glyph of the line stays inside the region.  Reference implementation of
@@ -352,7 +367,22 @@ def _line_budget(spans: np.ndarray, top: float, bottom: float, base_y: float,
     strict subset of the intersection, so nothing leaves the region.  The
     taper a letterer draws round an oval falls out of it - the symmetric
     half-width is small at the top and bottom and widest at the waist - with
-    no rule anywhere saying to make one."""
+    no rule anywhere saying to make one.
+
+    That subset is not cautious, it is exact: for a line of width ``W`` centred
+    on the axis, ``W <= 2 * half`` is the whole of what fits, and no other axis
+    does better for free (moving it off the optical centre costs rows at the
+    top and bottom of the balloon, which costs lines, which costs size).  So
+    the only term left to relax is the centring itself, and ``slack`` is how
+    far off the axis a line may sit.  The widest line that then fits is
+
+        W = min(right - left, 2 * (half + slack))
+
+    placed at whichever point of ``[left + W/2, right - W/2]`` intersected with
+    ``[ax - slack, ax + slack]`` lies nearest the axis.  Capping at the
+    intersection is what keeps containment exact; narrower lines are slid back
+    onto the axis by :func:`.anchor.line_centre`, so the wander is only ever
+    paid on the lines that spend it.  ``slack = 0`` is the strict rule above."""
     r0 = max(0, int(np.floor(top - base_y)))
     r1 = min(spans.shape[0], int(np.ceil(bottom - base_y)))
     if r1 <= r0:
@@ -367,7 +397,11 @@ def _line_budget(spans: np.ndarray, top: float, bottom: float, base_y: float,
     half = min(anchor_x - left, right - anchor_x)
     if half <= 0.0:
         return 0.0, 0.0
-    return 2.0 * half, float(anchor_x)
+    if slack <= 0.0:
+        return 2.0 * half, float(anchor_x)
+    width = min(right - left, 2.0 * (half + slack))
+    centre = min(max(anchor_x, left + width / 2.0), right - width / 2.0)
+    return width, float(min(max(centre, anchor_x - slack), anchor_x + slack))
 
 
 class _Spans:
@@ -393,7 +427,8 @@ class _Spans:
             self._right.append(np.minimum(pr[:-half], pr[half:]))
             j += 1
 
-    def budgets(self, tops: np.ndarray, bottoms: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def budgets(self, tops: np.ndarray, bottoms: np.ndarray,
+                slack: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
         """``(widths, centres)`` of the lines inking rows ``[tops, bottoms)``
         (absolute y, arrays of any common shape); zero where a line has no
         room.  Bit-for-bit the same as :func:`_line_budget` per element."""
@@ -426,8 +461,14 @@ class _Spans:
         # Symmetric about the axis; see :func:`_line_budget`.
         half = np.minimum(self.anchor_x - left, right - self.anchor_x)
         ok &= half > 0.0
-        widths[ok] = 2.0 * half[ok]
-        centres[ok] = self.anchor_x
+        if slack <= 0.0:
+            widths[ok] = 2.0 * half[ok]
+            centres[ok] = self.anchor_x
+            return widths, centres
+        w = np.minimum(right - left, 2.0 * (half + slack))
+        c = np.clip(self.anchor_x, left + w / 2.0, right - w / 2.0)
+        widths[ok] = w[ok]
+        centres[ok] = np.clip(c, self.anchor_x - slack, self.anchor_x + slack)[ok]
         return widths, centres
 
 
@@ -710,6 +751,14 @@ def typeset(
         # value would let it believe in a width no row can actually offer.
         widest_span = float(max(0.0, 2.0 * np.max(
             np.minimum(anchor_x - spans[:, 0], spans[:, 1] - anchor_x))))
+        if widest_span > 0.0:
+            # ``Placement.search`` uses this only to skip line counts that
+            # cannot hold the text wall-to-wall, so it has to stay an UPPER
+            # bound once a line may sit off the axis, or a feasible count is
+            # pruned.  The slack grows with the size, so bound it at the
+            # largest one tried.
+            widest_span = min(float(np.max(spans[:, 1] - spans[:, 0])),
+                              widest_span + 2.0 * _AXIS_SLACK_EM * max(max_size, min_size))
     sp = _Spans(spans, top, anchor_x)
 
     size0 = max(max_size, min_size)
@@ -782,7 +831,12 @@ def _typeset_at(
         return _finish(flow, line_h, glyph_h, widths, centres, block_top, flowed, anchor_x)
 
     slack = ANCHOR_SLACK_EM * size
-    search = Placement(flow, sp.budgets, finish, line_h=line_h, ink=ink,
+    # The horizontal slack is in ems, so it is only known here, where the size
+    # is.  Free text and horizontal captions anchor themselves (``anchor_x`` is
+    # None) and keep the whole intersection already, so they never pay for it.
+    axis_slack = _AXIS_SLACK_EM * size if anchor_x is not None else 0.0
+    budgets = (lambda t, b: sp.budgets(t, b, axis_slack)) if axis_slack > 0.0 else sp.budgets
+    search = Placement(flow, budgets, finish, line_h=line_h, ink=ink,
                        region=(region_top, region_bottom), anchor_y=centre_y,
                        slack=slack, width_quantum=_WIDTH_QUANTUM)
     for hyphenate in (False, True):
