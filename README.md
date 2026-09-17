@@ -71,9 +71,13 @@ and handles: drag it around, drag the corner to resize, then press `Escape` when
 - **Manga mode** is on by default. It groups speech bubbles so a whole bubble is translated as
   one sentence instead of line by line. Leave it on for comics; turn it off for websites and
   UI text.
-- **Quality renderer** (Engines tab) is off by default. If you installed it and have an NVIDIA
-  card, turn it on — it regenerates the artwork behind erased Japanese text so the page looks
-  like the text was never there. Without it you still get a clean result, just simpler.
+- **Quality renderer** (Engines tab) is on automatic by default, which costs you nothing until you
+  actually have it: without the extra models and an NVIDIA card it quietly stays out of the way and
+  you get the ordinary clean result. Once the models are downloaded it regenerates the artwork
+  behind erased Japanese text, so line work and speed lines carry on through instead of stopping
+  dead where the text used to be. It never downloads anything by itself, and it only improves a
+  panel after that panel has already been drawn, so nothing waits on it. Set it to **off** if you
+  would rather keep the graphics card free.
 
 ---
 

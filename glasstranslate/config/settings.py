@@ -236,7 +236,17 @@ class AppConfig:
     # Quality renderer (generative fill of free text over artwork, run by the
     # torch-using sidecar in ``renderer/``): "off" | "auto".  The optional
     # interpreter path overrides the lookup in ``render/quality.find_sidecar_python``.
-    quality_renderer: str = "off"
+    #
+    # "auto" is the default because it costs nothing to a machine that cannot use
+    # it: ``core/engines.build_quality_scheduler`` returns None when there is no
+    # sidecar interpreter, and again when the models are absent, so the quick fill
+    # is kept and nothing is ever downloaded on its own.  Where it does run it only
+    # upgrades a block that has already been drawn - the patch is swapped in behind
+    # ``clean_patch_serial`` - so it adds no latency to the first render.  Measured
+    # over the corpus it repairs line work the eraser has to destroy: the plain
+    # eraser leaves speed lines stopping dead at the edge of a cleared rectangle,
+    # and continuing them through is what this buys.
+    quality_renderer: str = "auto"
     quality_sidecar_python: str = ""
     # overlay
     overlay_opacity: float = 0.10  # background alpha, 0..1
@@ -318,7 +328,16 @@ class AppConfig:
             # Values of the wrong type are ignored so a hand-edited config
             # cannot put the app into an inconsistent state.
         # Enum-valued fields are normalised rather than trusted: an unknown
-        # quality-renderer mode must never launch a sidecar.
-        cfg.quality_renderer = normalize_quality_renderer(cfg.quality_renderer)
+        # quality-renderer mode must never launch a sidecar.  A value of the
+        # wrong TYPE has already been dropped by the loop above, which would
+        # leave the field's default - and that default is "auto", so a
+        # hand-edited config holding `"quality_renderer": 7` would switch the
+        # sidecar on by being unreadable.  A malformed value present in the file
+        # therefore fails safe to "off" rather than to the default.
+        if "quality_renderer" in data:
+            raw = data["quality_renderer"]
+            cfg.quality_renderer = normalize_quality_renderer(raw) if isinstance(raw, str) else "off"
+        else:
+            cfg.quality_renderer = normalize_quality_renderer(cfg.quality_renderer)
         cfg.quality_sidecar_python = str(cfg.quality_sidecar_python or "").strip()
         return cfg

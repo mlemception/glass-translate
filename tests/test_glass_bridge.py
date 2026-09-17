@@ -352,7 +352,11 @@ def test_manga_ocr_download_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_quality_renderer_round_trip_and_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The Engines card's combo edits the config and the hint follows the sidecar / model state."""
-    bridge, cfg, fired = _bridge(tmp_path, AppConfig(models_dir=str(tmp_path / "m")))
+    # Starts from an explicit "off" so this stays a test of the round trip; the
+    # default itself is pinned in tests/test_config.py, which is where a change
+    # to it should have to be argued.
+    bridge, cfg, fired = _bridge(
+        tmp_path, AppConfig(models_dir=str(tmp_path / "m"), quality_renderer="off"))
     assert bridge.qualityRenderer == "off" and bridge.qualityStatus == "Off"
     assert [item["value"] for item in bridge.qualityRendererOptions] == ["off", "auto"]
     bridge.qualityRenderer = "auto"

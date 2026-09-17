@@ -25,12 +25,19 @@ def test_defaults_are_sane():
     assert isinstance(cfg.overlay, OverlayGeometry)
 
 
-def test_quality_renderer_defaults_off_and_is_normalised(tmp_path: Path):
-    """An unknown mode from a hand-edited config must never launch the sidecar."""
+def test_quality_renderer_defaults_auto_and_is_normalised(tmp_path: Path):
+    """The default is "auto", and an unknown mode from a hand-edited config must
+    still never launch the sidecar.
+
+    "auto" is safe as a default because it degrades to the quick fill by itself:
+    ``core/engines.build_quality_scheduler`` returns None when there is no sidecar
+    interpreter and again when the models are absent, and nothing downloads them
+    unasked.  Garbage still normalises to "off", which is what this pins.
+    """
     from glasstranslate.config.settings import normalize_quality_renderer
 
     cfg = AppConfig()
-    assert cfg.quality_renderer == "off" and cfg.quality_sidecar_python == ""
+    assert cfg.quality_renderer == "auto" and cfg.quality_sidecar_python == ""
     assert normalize_quality_renderer("Auto") == "auto"
     assert normalize_quality_renderer(" off ") == "off"
     for bad in ("cuda", "", None, 3, "on"):

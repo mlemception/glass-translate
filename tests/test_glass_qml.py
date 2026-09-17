@@ -267,10 +267,16 @@ def test_engines_page_has_the_quality_renderer_card(window: C.ControlWindow, qap
     combo = root.findChild(QQuickItem, "qualityRendererCombo")
     button = root.findChild(QQuickItem, "qualityDownloadButton")
     assert card is not None and combo is not None and button is not None
-    assert _qml_value(combo, "value") == "off"
-    assert _qml_value(card, "bridge.qualityStatus") == "Off"
+    assert _qml_value(combo, "value") == "auto"  # the default
     assert _qml_value(button, "enabled") is True  # no download running
     assert "Download quality models" in str(_qml_value(button, "text"))
+    # Round trip, driven away from the default first so neither assertion can
+    # pass by simply reading the default back.
+    window.bridge.qualityRenderer = "off"
+    qapp.processEvents()
+    assert _qml_value(combo, "value") == "off"
+    assert _qml_value(card, "bridge.qualityStatus") == "Off"
+    assert window.config.quality_renderer == "off"
     window.bridge.qualityRenderer = "auto"
     qapp.processEvents()
     assert _qml_value(combo, "value") == "auto"
