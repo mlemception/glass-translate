@@ -33,6 +33,5 @@ renderer/.venv/
 /demo/reference/
 /demo/cache/
 
-# The run proposes manual changes here instead of editing docs/AUTONOMOUS_RUN.md itself.
-# Process notes, never shipped (MEMORY.md: AI process docs stay private).
+# Local working notes, like the other process docs in this repo. Never shipped.
 /docs/MANUAL_PROPOSALS.md
