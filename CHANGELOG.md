@@ -4,6 +4,51 @@ All notable changes to GlassTranslate are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-17
+
+Two changes to how balloons are lettered, and the artwork repair is now on by default.
+
+### Changed
+
+- **The quality renderer defaults to automatic.** It regenerates the artwork behind erased
+  Japanese text, so line work and speed lines carry on through instead of stopping dead at the
+  edge of a cleared rectangle. Measured over 50 pages against the plain eraser, a blind
+  comparison preferred it on every region it touched, 6 to 0, with two untouched controls
+  called identical; it changed 31 of those 50 pages. **It costs nothing if you cannot use it**
+  — with no NVIDIA card or no models downloaded it quietly keeps the ordinary fill, and it
+  never downloads anything by itself. Where it does run it only improves a panel *after* that
+  panel has already been drawn, so nothing waits on it. Peak VRAM is about 11 GB. Set it to
+  **off** on the Engines tab to keep the graphics card free.
+
+  Be clear about what it does: it repairs tone damage. It does not rebuild line art that was
+  destroyed, and regenerated areas come back with smoother screentone than the printed page has.
+
+- **Balloon lettering is condensed in the app, not just in the offline renderer.** The bundled
+  face is about 14 % wider than a printed English edition's, so a line that did not fit used to
+  step *down* a size instead. Glyphs are now squeezed horizontally to 85 % as they are drawn,
+  which lets the text keep its size and fill the balloon. A three-line balloon that previously
+  set its widest line 15 % wider than the balloon interior — clipped at both walls — now sits
+  inside it at the same size. Free text over artwork is deliberately left alone: it has no
+  container to grow safely inside, and condensing it walked a block into a panel border.
+
+- **A line may sit slightly off a balloon's centre line to use the width the balloon has.**
+  Every line used to be centred exactly, which meant its width was capped by whichever side of
+  the balloon was nearer — on a balloon drawn around a vertical Japanese column, often far less
+  than the balloon really offers. A line may now sit up to a fifth of an em off centre, which
+  removed a whole size step of shrinking on many blocks and cut hyphenated line breaks by about
+  an eighth across a 50-page sample.
+
+### Fixed
+
+- **The quality renderer no longer repaints a neighbouring speech balloon.** Where a caption
+  sat against a balloon, the feathered edge of its repair could bleed onto the balloon's clean
+  paper — on the worst page, 43 % of the pixels it changed. Balloon interiors are now excluded
+  from the repair, cutting that by 94 %.
+
+- **A hand-edited settings file can no longer switch the quality renderer on by being
+  unreadable.** A malformed value now falls back to *off* explicitly rather than to whatever the
+  built-in default happens to be.
+
 ## [0.3.0] - 2026-09-16
 
 Lettering, reviewed blind. Every change below was accepted only on a blind comparison:
