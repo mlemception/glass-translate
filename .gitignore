@@ -32,3 +32,6 @@ renderer/.venv/
 # thousands of them.  Anchored to the repo root.
 /demo/reference/
 /demo/cache/
+
+# Local working notes, like the other process docs in this repo. Never shipped.
+/docs/MANUAL_PROPOSALS.md
