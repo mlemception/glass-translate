@@ -117,6 +117,11 @@ REGION_PAD_EM = 1.5  # automatic regions reach this many source ems around the b
 REGION_MIN_PX = 160  # ...and are at least this big on each side
 TILE_W = 240  # width of each tile in a comparison sheet
 SHEET_QUALITY = 65  # JPEG quality; sheets are greyscale and must stay well under 60 KB for model viewing
+# Whole-page sheets: the WHOLE composed sheet stays under this on its long side, so a
+# model may view it (CLAUDE.md forbids full-resolution pages - those killed a session).
+# Two portrait pages side by side land near 1000x730, which keeps lettering legible at
+# roughly 45% of source scale; three land near 1000x490 and are for balance, not text.
+PAGE_SHEET_LONG_SIDE = 1000
 
 
 # ------------------------------------------------------------ page resolution
@@ -328,6 +333,33 @@ def comparison_sheet(
     sheet = Image.new("L", (TILE_W * len(tiles) + 6 * (len(tiles) - 1), h), 110)
     for i, t in enumerate(tiles):
         sheet.paste(t.convert("L"), (i * (TILE_W + 6), 0))
+    return sheet
+
+
+def page_sheet(tiles: Sequence[Image.Image], long_side: int = PAGE_SHEET_LONG_SIDE) -> Image.Image:
+    """Whole pages side by side, greyscale, the composed sheet bounded by ``long_side``.
+
+    A region crop answers "is this block right".  It cannot answer "is the page getting
+    closer", and on a sparse page it often frames nothing at all.  This does: the judge
+    sees balance, density, where the eye goes, and how the whole thing reads against the
+    reference - at a scale a model is allowed to look at.
+    """
+    pages = [t for t in tiles if t is not None]
+    if not pages:
+        raise ValueError("page_sheet needs at least one page")
+    gap = 8
+    h = max(p.height for p in pages)
+    # Normalise heights first so pages of different sizes line up.
+    scaled = [p.convert("L").resize((max(1, int(p.width * h / p.height)), h), Image.LANCZOS) for p in pages]
+    w = sum(p.width for p in scaled) + gap * (len(scaled) - 1)
+    sheet = Image.new("L", (w, h), 110)
+    x = 0
+    for p in scaled:
+        sheet.paste(p, (x, 0))
+        x += p.width + gap
+    if max(sheet.size) > long_side:
+        k = long_side / max(sheet.size)
+        sheet = sheet.resize((max(1, int(sheet.width * k)), max(1, int(sheet.height * k))), Image.LANCZOS)
     return sheet
 
 
@@ -588,6 +620,21 @@ def run_page(args: argparse.Namespace, image: Path, out_dir: Path) -> int:
         encoding="utf-8",
     )
 
+    # Whole-page sheets first: these are what the blind judge reads. They are written
+    # unconditionally because "how close is the page" is the question the run is asking.
+    orig_page = Image.fromarray(np.ascontiguousarray(img[:, :, ::-1]))
+    ours_page = Image.fromarray(np.ascontiguousarray(out[:, :, ::-1]))
+    ref_page = None
+    if not args.no_ref_image:
+        _rp = aligned_reference_for(stem) or reference_image_for(image)
+        if _rp is not None:
+            ref_page = Image.open(_rp).convert("RGB")
+    page_sheet([orig_page, ours_page] + ([ref_page] if ref_page is not None else [])).save(
+        out_dir / f"{tag}_page.jpg", quality=SHEET_QUALITY)
+    if ref_page is not None:
+        # Ours against the reference alone, so each page gets the width to stay legible.
+        page_sheet([ours_page, ref_page]).save(out_dir / f"{tag}_page_ab.jpg", quality=SHEET_QUALITY)
+
     if args.regions != "none":
         regions = page_regions(stem, blocks, img.shape)
         names = list(regions) if args.regions in ("all", "auto") else [r.strip() for r in args.regions.split(",") if r.strip()]
@@ -634,7 +681,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="sidecar params, e.g. strength=0.4,steps=24,controlnet_scale=0.8,guidance=4.0,sdxl=true")
     parser.add_argument("--new-erase", action="store_true", help="no-op (erase.apply runs inside build_blocks)")
     parser.add_argument("--new-place", action="store_true", help="no-op (place is the default geometry)")
-    parser.add_argument("--regions", default="all", help="comma-separated region names, or 'all'/'auto'/'none'")
+    # Default 'none': whole-page sheets are always written and are what the judge reads.
+    # Region crops are a debugging tool for one block - on a sparse page they frame
+    # nothing at all - so ask for them explicitly.
+    parser.add_argument("--regions", default="none", help="comma-separated region names, or 'all'/'auto'/'none' (default none; whole-page sheets are always written)")
     parser.add_argument("--no-ref-image", action="store_true", help="omit the reference tile from the sheets")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)

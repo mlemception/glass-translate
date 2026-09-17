@@ -32,3 +32,7 @@ renderer/.venv/
 # thousands of them.  Anchored to the repo root.
 /demo/reference/
 /demo/cache/
+
+# The run proposes manual changes here instead of editing docs/AUTONOMOUS_RUN.md itself.
+# Process notes, never shipped (MEMORY.md: AI process docs stay private).
+/docs/MANUAL_PROPOSALS.md
