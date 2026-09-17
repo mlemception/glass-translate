@@ -152,6 +152,13 @@ TONE_TOL = 12  # grey levels: a local background this close to the paper colour 
 TONE_MIN_SAMPLES = 0.1  # fraction of the estimate's square that must be background to trust the mean
 PAPER_TOL = 45  # grey levels from the paper colour that still count as paper (bubbles)
 OUTLINE_MIN = 0.35  # bubbles: an ink component at least this fraction of the window's short side may be the outline
+# ...but only if it is not the lettering itself: a component at least this far inside the block's
+# own text boxes is the text, which is glyph-sized on light paper but runs the length of a column
+# on dark paper, where the ink mask selects light pixels.  Measured over the corpus the two
+# populations do not overlap - outlines sit at 0.000-0.013 of their area inside the boxes and
+# lettering at 0.422-1.000 - and the result is identical anywhere in 0.30-0.40.  Above 1.0 nothing
+# is excluded, which is the disabled setting.
+OUTLINE_IN_TEXT = 0.35
 OUTLINE_FRINGE = 1  # px of anti-aliased edge kept with a bubble outline
 # Bubbles: the paper fill reaches this many glyphs beyond the text boxes (strays and furigana
 # next to the column are filled; art drawn across the balloon farther away is kept).
@@ -882,7 +889,14 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
     own = _paint((h, w), ctx.main + ctx.furi, PAD)
     zone_pad = max(PAD, int(round(BUBBLE_ZONE_EM * max(ctx.glyph, 1.0))))
     zone = _paint((h, w), ctx.main + ctx.furi, zone_pad)
+    # The outline candidates.  A component mostly inside the block's own text
+    # boxes is that block's lettering, not the balloon's edge: on dark paper the
+    # ink mask selects light pixels, so a column of glyphs joins into one
+    # component the length of the column and clears OUTLINE_MIN on its own.
+    # Carving it below would punch the lettering back out of the paper map and
+    # leave the interior a handful of specks between the strokes.
     big = comps.maxdim >= OUTLINE_MIN * min(h, w)
+    big &= _fraction_inside(comps.labels, own, comps.area) < OUTLINE_IN_TEXT
     big[0] = False
     big_mask = comps.mask_of(big)
 
