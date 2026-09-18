@@ -127,3 +127,25 @@ def test_pinned_digests_are_lowercase_hex_of_the_right_length() -> None:
             continue
         assert re.fullmatch(r"[0-9a-f]{64}", digest), f"{url}: {digest!r} is not a sha256"
         assert size > 0, f"{url}: size must be positive"
+
+
+# The files the Sugoi repository actually publishes, read from the Hugging Face tree API at
+# revision 71d67eb8e73ec2f5aaefc0689e03a4eb843d3a2b (the tip of main, last modified 2024-11-21,
+# checked 2026-09-18).  It keeps SEPARATE vocabularies - there has never been a
+# shared_vocabulary.json - so a list that asks for one downloads the 1.1 GB model.bin and then
+# fails on a 404, and never fetches the vocabularies CTranslate2 needs to load the model.
+SUGOI_PUBLISHED = frozenset({
+    ".gitattributes", "LICENSE", "README.md", "config.json", "model.bin",
+    "source_vocabulary.json", "target_vocabulary.json",
+    "spm/spm.en.nopretok.model", "spm/spm.en.nopretok.vocab",
+    "spm/spm.ja.nopretok.model", "spm/spm.ja.nopretok.vocab",
+})
+
+
+def test_every_sugoi_file_the_app_downloads_is_one_the_repository_publishes():
+    missing = sorted(set(SUGOI_FILES) - SUGOI_PUBLISHED)
+    assert not missing, f"these would 404 during the Sugoi download: {missing}"
+
+
+def test_the_sugoi_download_includes_the_vocabularies_ctranslate2_loads():
+    assert {"config.json", "model.bin", "source_vocabulary.json", "target_vocabulary.json"} <= set(SUGOI_FILES)
