@@ -458,3 +458,60 @@ def test_only_the_detector_is_capped_not_the_reach_through_the_text():
     src = inspect.getsource(erase._art_lines)
     assert "ext = HOUGH_EXTEND * g" in src, "the extrapolation reach must not be capped"
     assert "HOUGH_MIN_LEN * gd" in src and "HOUGH_OUTSIDE * gd" in src
+
+
+def _narrow_dark_balloon() -> tuple[np.ndarray, np.ndarray, np.ndarray, Rect, Rect, Rect]:
+    """``(page, interior, outline, bubble, text_box, stray)`` for a dark balloon
+    no wider than the single column it holds - the shape a balloon drawn round
+    one vertical line of Japanese actually takes.
+
+    The lettering is light on dark paper, so the ink mask selects light pixels
+    and the column's strokes join into ONE component running the balloon's
+    length.  ``_bubble_page``'s columns leave a 6 px gap between glyphs and stay
+    separate, which is why they never showed this.  ``stray`` is source ink
+    inside the balloon but outside the OCR box - what ``bubble_ink_px`` counts,
+    and what survives when the interior collapses to the text boxes."""
+    ink, paper = 235, 20
+    img = _hatched_page(300, 300, paper=PAPER)
+    shape = np.zeros((300, 300), np.uint8)
+    cv2.ellipse(shape, (150, 150), (34, 78), 0, 0, 360, 1, -1)
+    interior = shape.astype(bool)
+    outline = cv2.dilate(shape, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))).astype(bool) & ~interior
+    img[interior] = (paper, paper, paper)
+    img[outline] = (ink, ink, ink)
+    glyph = 26
+    x0, y0 = 150 - glyph // 2, 150 - 65
+    for i in range(5):  # abutting glyphs: one component, as a real column reads
+        y = y0 + i * glyph
+        cv2.rectangle(img, (x0, y), (x0 + glyph - 1, y + 4), (ink, ink, ink), -1)
+        cv2.rectangle(img, (x0 + glyph // 2 - 2, y), (x0 + glyph // 2 + 2, y + glyph - 1), (ink, ink, ink), -1)
+    stray = Rect(x0 + glyph + 3, y0 + 20, 6, 15)
+    cv2.rectangle(img, (stray.x, stray.y), (stray.x2 - 1, stray.y2 - 1), (ink, ink, ink), -1)
+    ys, xs = np.nonzero(interior)
+    bubble = Rect(int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+    return img, interior, outline, bubble, Rect(x0, y0, glyph, 5 * glyph), stray
+
+
+def test_a_dark_balloons_own_column_is_not_mistaken_for_its_outline():
+    """Light lettering on dark paper joins into a component long enough to pass
+    ``OUTLINE_MIN``.  Carving it out of the paper map with the outline left the
+    seed on a carved pixel, so the interior fell back to the padded text boxes
+    and every mark beside the column survived the erase."""
+    img, interior, outline, bubble, box, stray = _narrow_dark_balloon()
+    seg = Segment("テスト", _quad(box), 0.9)
+    style = SegmentStyle(fg=(235, 235, 235), bg=(20, 20, 20), angle_deg=0.0,
+                         text_height_px=26.0, vertical=True, in_bubble=True)
+    patch, rect, flag = erase.erase_block(img, TextBlock(seg, style, [seg], [], bubble))
+    result = img.copy()
+    result[rect.y: rect.y2, rect.x: rect.x2] = patch
+    g = _gray(result)
+    # The stray mark is inside the balloon and outside the OCR box: it is erased.
+    assert (g[stray.y: stray.y2, stray.x: stray.x2] == 20).all()
+    # The whole interior away from the outline is paper again.
+    inner = interior & ~cv2.dilate(outline.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    assert (g[inner] == 20).all()
+    # The outline is untouched - the column must not re-paper the balloon's edge.
+    assert (result[outline] == img[outline]).all()
+    # Nothing outside the balloon changed.
+    outside = ~cv2.dilate((interior | outline).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    assert (result[outside] == img[outside]).all()
