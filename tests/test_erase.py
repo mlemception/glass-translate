@@ -582,3 +582,45 @@ def test_without_the_layout_bound_the_hatching_is_painted(monkeypatch):
 def test_the_bound_undoes_exactly_the_inset_layout_applies():
     from glasstranslate.render import layout
     assert erase.BOUND_MARGIN_EM == layout._BUBBLE_MARGIN_EM
+
+
+def _balloon_with_an_unboxed_glyph():
+    """``(page, block, glyph_mask)`` - a light balloon whose boxed column sits in its right
+    half, with a character the OCR never boxed in its left half.  layout.py's lettering mask
+    keeps only the half the boxed text is on, as its one-piece cut does on real pages."""
+    img = np.full((300, 300, 3), PAPER, np.uint8)
+    balloon = np.zeros((300, 300), np.uint8)
+    cv2.ellipse(balloon, (150, 150), (90, 70), 0, 0, 360, 1, -1)
+    ring = cv2.dilate(balloon, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))).astype(bool) & ~balloon.astype(bool)
+    img[ring] = (0, 0, 0)
+    box = _draw_column(img, 172, 112, 3, 26)
+    mark = np.zeros((300, 300), np.uint8)
+    cv2.rectangle(mark, (90, 140), (110, 160), 1, 3)  # a boxy character nobody boxed
+    cv2.line(mark, (90, 150), (110, 150), 1, 3)
+    img[mark > 0] = (0, 0, 0)
+    ys, xs = np.nonzero(balloon)
+    rect = Rect(int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+    inset = cv2.erode(balloon, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)))
+    inset[:, :145] = 0  # the one piece the boxed text is on
+    seg = Segment("テスト", _quad(box), 0.9)
+    style = SegmentStyle(fg=(0, 0, 0), bg=(PAPER, PAPER, PAPER), angle_deg=0.0, text_height_px=26.0,
+                         vertical=True, in_bubble=True, layout_box=rect,
+                         layout_mask=inset[rect.y: rect.y2, rect.x: rect.x2].astype(bool))
+    return img, TextBlock(seg, style, [seg], [], rect), mark.astype(bool)
+
+
+def test_an_unboxed_character_outside_the_balloon_layout_found_is_still_erased():
+    """Bounding the fill by the balloon layout.py found also withheld the lettering the OCR
+    never boxed - a glyph lying outside both the boxes and that balloon was left standing.
+    A stray glyph-wide in both directions is lettering, whichever side of the bound it is on."""
+    img, block, mark = _balloon_with_an_unboxed_glyph()
+    out = _erased(img, block)
+    assert (_gray(out)[mark] == PAPER).all(), "the unboxed character was left standing"
+
+
+def test_with_no_glyph_exemption_the_unboxed_character_survives(monkeypatch):
+    """The fixture reproduces the defect: exempt nothing, and the bound withholds it."""
+    monkeypatch.setattr(erase, "BOUND_GLYPH_MIN", 99.0)
+    img, block, mark = _balloon_with_an_unboxed_glyph()
+    out = _erased(img, block)
+    assert not (_gray(out)[mark] == PAPER).all()
