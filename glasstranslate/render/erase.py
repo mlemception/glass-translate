@@ -171,6 +171,13 @@ BUBBLE_ZONE_EM = 1.5
 # balloon is larger than a glyph or joined to the outline, so it is not
 # collected here and the zone still keeps it.
 BUBBLE_STRAY_INSIDE = 0.9
+# Bubbles: the fill never paints past the balloon layout.py found - its lettering mask with the
+# glyph holes closed and its inset undone - except over the words themselves.  The eraser's own
+# interior is the paper component the text sits on, and where a dark balloon runs into dark
+# artwork that component runs on into the drawing, taking its hatching with it.
+LAYOUT_BOUND = True  # False reproduces the unbounded fill exactly
+BOUND_MARGIN_EM = 0.18  # the inset layout.py applies (_BUBBLE_MARGIN_EM); a test keeps them equal
+BOUND_LETTER_EM = 0.3  # the words: text and furigana boxes padded this many glyphs
 # Low-confidence OCR lines as erase evidence (:func:`apply`).  Ruby is the
 # smallest, faintest thing on a page, so it is the first line the detector
 # loses to the confidence floor - 4ja returns ``めぐみ`` at 0.26 against a floor
@@ -211,6 +218,7 @@ class _Ctx:
     furi_side: int  # +1: furigana at larger x, -1: at smaller x
     bubble: bool = False
     hatch_dirs: Optional[np.ndarray] = None  # directions (degrees) of a hatching field around the text
+    bound: Optional[np.ndarray] = None  # bubbles: bool (h, w), the balloon layout.py found
 
 
 @dataclass
@@ -934,12 +942,34 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
     if stray.any():
         _paint_into(zone, comps.rects(stray), PAD)
     erase = interior & zone.astype(bool) & ~_dilate(outline, OUTLINE_FRINGE)
+    if ctx.bound is not None:
+        words = _paint((h, w), ctx.main + ctx.furi, max(PAD, int(round(BOUND_LETTER_EM * max(ctx.glyph, 1.0)))))
+        erase &= ctx.bound | (words > 0)
     kept = ink.astype(bool) & ~erase
     empty = np.zeros((h, w), dtype=bool)
     return _Analysis(erase, kept, empty, None)
 
 
 # --------------------------------------------------------------- per block
+def _layout_bound(block: TextBlock, win: Rect) -> Optional[np.ndarray]:
+    """The balloon ``layout.py`` found, in the coordinates of ``win``: its
+    lettering mask (``style.layout_mask`` over ``style.layout_box``) with the
+    glyph holes closed and the inset undone.  None when there is none."""
+    style = block.style
+    if style.layout_mask is None or style.layout_box is None:
+        return None
+    mask = np.asarray(style.layout_mask).astype(bool)
+    lb = style.layout_box
+    x0, y0 = max(lb.x, win.x), max(lb.y, win.y)
+    x1, y1 = min(lb.x + mask.shape[1], win.x2), min(lb.y + mask.shape[0], win.y2)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    region = np.zeros((win.h, win.w), dtype=bool)
+    region[y0 - win.y : y1 - win.y, x0 - win.x : x1 - win.x] = mask[y0 - lb.y : y1 - lb.y, x0 - lb.x : x1 - lb.x]
+    em = float(block.em_px or style.text_height_px or 1.0)
+    return _dilate(_fill_holes(region), max(3, int(round(BOUND_MARGIN_EM * em))) + 2)
+
+
 def _boxes(block: TextBlock) -> Tuple[List[Rect], List[Rect]]:
     return [m.bbox for m in block.members], [f.bbox for f in block.furigana]
 
@@ -1094,6 +1124,10 @@ def erase_block_masked(
         +1 if vertical else -1,
         bubble,
     )
+    if bubble and LAYOUT_BOUND:
+        bound = _layout_bound(block, win)
+        if bound is not None:
+            ctx.bound = np.ascontiguousarray(bound if vertical else bound.T)
     res = _analyse_bubble(ctx) if bubble else _analyse_open(ctx)
     erase, kept, ring, fill = res.erase, res.kept, res.ring, res.fill
     if not vertical:
