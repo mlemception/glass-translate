@@ -515,3 +515,70 @@ def test_a_dark_balloons_own_column_is_not_mistaken_for_its_outline():
     # Nothing outside the balloon changed.
     outside = ~cv2.dilate((interior | outline).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
     assert (result[outside] == img[outside]).all()
+
+
+def _dark_balloon_joined_to_art():
+    """``(page, block, hatching, balloon)`` - a dark balloon whose dark paper runs on into a
+    dark arm drawn beside it, the arm shaded with white hatching.  Seen as paper the arm is
+    part of the balloon, and its hatching is a set of holes to be filled."""
+    ink, paper = 235, 20
+    img = np.full((300, 300, 3), PAPER, np.uint8)
+    balloon = np.zeros((300, 300), np.uint8)
+    cv2.ellipse(balloon, (170, 150), (36, 85), 0, 0, 360, 1, -1)
+    img[balloon > 0] = (paper, paper, paper)
+    img[110:190, 95:150] = (paper, paper, paper)  # the arm, joined to the balloon
+    hatching = np.zeros((300, 300), bool)
+    for y in range(114, 186, 7):
+        cv2.line(hatching.view(np.uint8), (118, y), (128, y + 4), 1, 1)
+    img[hatching] = (ink, ink, ink)
+    glyph = 26
+    x0, y0 = 170 - glyph // 2, 150 - 65
+    for i in range(5):  # a column of abutting light glyphs, as on the real pages
+        y = y0 + i * glyph
+        cv2.rectangle(img, (x0, y), (x0 + glyph - 1, y + 4), (ink, ink, ink), -1)
+        cv2.rectangle(img, (x0 + glyph // 2 - 2, y), (x0 + glyph // 2 + 2, y + glyph - 1), (ink, ink, ink), -1)
+    box = Rect(x0, y0, glyph, 5 * glyph)
+    # layout.py's interior rect spans the whole joined dark region, but its inset lettering mask
+    # keeps only the piece the text is on - the balloon, not the arm.
+    joined = balloon.copy()
+    joined[110:190, 95:150] = 1
+    ys, xs = np.nonzero(joined)
+    rect = Rect(int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+    inset = cv2.erode(balloon, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))).astype(bool)
+    seg = Segment("テスト", _quad(box), 0.9)
+    style = SegmentStyle(fg=(ink, ink, ink), bg=(paper, paper, paper), angle_deg=0.0, text_height_px=26.0,
+                         vertical=True, in_bubble=True, layout_box=rect,
+                         layout_mask=inset[rect.y: rect.y2, rect.x: rect.x2])
+    return img, TextBlock(seg, style, [seg], [], rect), hatching, balloon.astype(bool)
+
+
+def _erased(img, block):
+    patch, rect, _ = erase.erase_block(img, block)
+    out = img.copy()
+    out[rect.y: rect.y2, rect.x: rect.x2] = patch
+    return out
+
+
+def test_a_dark_balloon_does_not_paint_over_the_artwork_it_runs_into():
+    """Once a dark balloon's own lettering stopped being carved out of the paper map, its
+    interior became the whole dark region the text sits on - and where that region runs on
+    into dark artwork, the fill painted the art's hatching flat.  The balloon layout.py found
+    bounds it."""
+    img, block, hatching, balloon = _dark_balloon_joined_to_art()
+    out = _erased(img, block)
+    assert (out[hatching] == img[hatching]).all(), "the hatching beside the balloon was painted over"
+    inner = balloon & ~cv2.dilate((~balloon).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    assert (_gray(out)[inner] == 20).all(), "the balloon's own lettering must still be erased"
+
+
+def test_without_the_layout_bound_the_hatching_is_painted(monkeypatch):
+    """The fixture above really does reproduce the defect: unbounded, the fill reaches it."""
+    monkeypatch.setattr(erase, "LAYOUT_BOUND", False)
+    img, block, hatching, _ = _dark_balloon_joined_to_art()
+    out = _erased(img, block)
+    assert not (out[hatching] == img[hatching]).all()
+
+
+def test_the_bound_undoes_exactly_the_inset_layout_applies():
+    from glasstranslate.render import layout
+    assert erase.BOUND_MARGIN_EM == layout._BUBBLE_MARGIN_EM
