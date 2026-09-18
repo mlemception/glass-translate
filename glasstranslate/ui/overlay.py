@@ -88,6 +88,7 @@ from ..render.compose import (MANGA_FONT_PATH, block_italic, condenses, halo_px,
 from ..render.fit import FitResult, Measure, fit_text
 from ..render.style import quad_text_height, quad_text_width
 from ..render.typeset import Typeset
+from .glass import profile
 
 __all__ = ["GlassOverlay", "bgr_to_qimage", "load_manga_font", "make_font", "qt_measurer"]
 
@@ -511,6 +512,8 @@ class GlassOverlay(QWidget):
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        # ``GLASSTRANSLATE_PROFILE`` only: off, begin() returns 0.0 and end() is empty.
+        t_paint = profile.profiler.begin()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
@@ -540,6 +543,7 @@ class GlassOverlay(QWidget):
         if self._grab_mode:
             self._paint_grab_frame(painter)
         painter.end()
+        profile.profiler.end("paint_ms", t_paint)
 
     # ---------------------------------------------------------- painting
     def _paint_clean_patch(self, painter: QPainter, index: int, style: SegmentStyle, dpr: float) -> None:
@@ -580,7 +584,9 @@ class GlassOverlay(QWidget):
                 measure = self._block_measure_italic_condensed if condensed else self._block_measure_italic
             else:
                 measure = self._block_measure_condensed if condensed else self._block_measure
+            t_ts = profile.profiler.begin()
             ts = typeset_block(text, style, measure, lang=seg.tgt_lang or "en")
+            profile.profiler.end("overlay_typeset_ms", t_ts)
             if index >= 0:
                 self._typesets[index] = ts
         if not ts.lines:
@@ -590,7 +596,9 @@ class GlassOverlay(QWidget):
         font = make_font(family, ts.size, italic=italic, condensed=condensed)
         layer = self._layers.get(index) if index >= 0 else None
         if layer is None:
+            t_layer = profile.profiler.begin()
             layer = self._render_layer(ts, font, style)
+            profile.profiler.end("overlay_layer_ms", t_layer)
             if index >= 0:
                 self._layers[index] = layer
         image, x0, y0 = layer
@@ -818,6 +826,7 @@ class GlassOverlay(QWidget):
     # ------------------------------------------------------------- slots
     @Slot(object)
     def _apply_segments(self, segments: object) -> None:
+        t_apply = profile.profiler.begin()
         new = list(segments) if isinstance(segments, (list, tuple)) else []
         # The pipeline re-emits the very same TranslatedSegment objects on
         # every pass that changed nothing (and for the untouched blocks of a
@@ -856,3 +865,8 @@ class GlassOverlay(QWidget):
         self._patches = patches
         self._patch_serials = serials
         self.update()
+        # ``fresh`` = segments this pass had to lay out from scratch, which is what makes a
+        # result a new page for the profiling report.  Counting it costs a pass over the list,
+        # so it only runs while profiling is on; the no-op recorder ignores the 0.
+        fresh = sum(1 for seg in new if id(seg) not in old_index) if profile.profiler.enabled else 0
+        profile.profiler.end("overlay_apply_ms", t_apply, blocks=len(new), fresh=fresh)

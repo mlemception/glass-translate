@@ -19,8 +19,27 @@ Event kinds recorded by the hooks (see ``docs/perf/2026-09-09-glass-baseline.md`
                  GUI-dispatch timestamps                                        GUI thread
 * ``tab``        ``tabBar.currentIndex`` changed (``index``)                   GUI thread
 
-``dump(path)`` writes one JSON object per line; ``summary()`` counts events per kind and
-computes latency percentiles for the paired kinds in :data:`PAIRS`.
+Overlay hooks (lag baseline 2026-09-18, ``overlay.py``), recorded through :meth:`Profiler.begin` /
+:meth:`Profiler.end` so the call site keeps its shape:
+
+* ``overlay_apply_ms``    ``_apply_segments`` (``ms``, ``blocks``, ``fresh``)     GUI thread
+* ``overlay_typeset_ms``  one ``typeset_block`` layout (``ms``)                   GUI thread
+* ``overlay_layer_ms``    one lettering layer render (``ms``)                     GUI thread
+* ``paint_ms``            one ``paintEvent`` (``ms``)                             GUI thread
+
+Kinds the dev driver ``tools/profile_glass.py`` records itself:
+
+* ``meta``   one per run, the run's parameters (see ``tools/glass_report.analyse``)
+* ``phase``  a scripted phase boundary (``name``, ``edge`` = ``start``/``stop``, ``rep``)
+* ``tick``   the driver's heartbeat timer fired on the GUI thread
+* ``page``   the alternating page source served another page (``index``, ``name``)
+* ``gc``     a garbage collection ran (``gen``, ``ms``, ``thread``)
+
+``dump(path)`` writes one JSON object per line; ``summary()`` counts events per kind,
+computes latency percentiles for the paired kinds in :data:`PAIRS` and reports the deque's
+``capacity`` together with the number of events it had to evict (``dropped``).  A run with
+``dropped > 0`` measured less than it recorded: raise the capacity through
+``install(maxlen=...)`` rather than trusting the numbers.
 """
 from __future__ import annotations
 
@@ -102,8 +121,16 @@ class NoopProfiler:
     """Stand-in when profiling is off: every method is an empty call."""
 
     enabled = False
+    dropped = 0
+    capacity = 0
 
     def mark(self, kind: str, **payload: Any) -> None:
+        return None
+
+    def begin(self) -> float:
+        return 0.0
+
+    def end(self, kind: str, t0: float, **payload: Any) -> None:
         return None
 
     def geometry(self, kind: str, rect: Optional[Rect]) -> None:
@@ -135,12 +162,35 @@ class Profiler(NoopProfiler):
 
     def __init__(self, maxlen: int = MAX_EVENTS) -> None:
         self._lock = threading.Lock()
-        self._events: Deque[Event] = deque(maxlen=maxlen)
+        # Clamped: a deque with maxlen 0 silently records nothing, and a negative one raises.
+        self._events: Deque[Event] = deque(maxlen=max(1, int(maxlen)))
+        self._dropped = 0
+
+    @property
+    def capacity(self) -> int:
+        """How many events the deque holds before it starts evicting."""
+        return self._events.maxlen or 0
+
+    @property
+    def dropped(self) -> int:
+        """Events evicted because the deque was full (0 = the run is complete)."""
+        with self._lock:
+            return self._dropped
 
     def mark(self, kind: str, **payload: Any) -> None:
         t = time.perf_counter()
         with self._lock:
+            if len(self._events) == self._events.maxlen:
+                self._dropped += 1
             self._events.append((t, kind, payload))
+
+    def begin(self) -> float:
+        """Start of a span; pass the result to :meth:`end` (0.0 when profiling is off)."""
+        return time.perf_counter()
+
+    def end(self, kind: str, t0: float, **payload: Any) -> None:
+        """Record ``kind`` with ``ms`` = the time since ``t0``, plus ``payload``."""
+        self.mark(kind, ms=(time.perf_counter() - t0) * 1000.0, **payload)
 
     def geometry(self, kind: str, rect: Optional[Rect]) -> None:
         """Record ``kind`` with a physical rect payload (``x, y, w, h``)."""
@@ -171,6 +221,7 @@ class Profiler(NoopProfiler):
     def clear(self) -> None:
         with self._lock:
             self._events.clear()
+            self._dropped = 0
 
     def dump(self, path: os.PathLike[str] | str) -> int:
         """Write every event as one JSON line; returns the number of lines written."""
@@ -197,6 +248,8 @@ class Profiler(NoopProfiler):
             "counts": dict(counts),
             "ms": {kind: percentiles(v) for kind, v in ms_by_kind.items()},
             "latency_ms": latency,
+            "dropped": self.dropped,
+            "capacity": self.capacity,
         }
 
 
@@ -204,11 +257,15 @@ profiler: NoopProfiler = NoopProfiler()
 mark: Callable[..., None] = profiler.mark
 
 
-def install(force: Optional[bool] = None) -> NoopProfiler:
-    """(Re)create the module singleton from the environment (or ``force``); returns it."""
+def install(force: Optional[bool] = None, maxlen: Optional[int] = None) -> NoopProfiler:
+    """(Re)create the module singleton from the environment (or ``force``); returns it.
+
+    ``maxlen`` is the new recorder's event capacity (default :data:`MAX_EVENTS`, floor 1); a
+    long scripted run raises it so nothing is evicted.
+    """
     global profiler, mark
     on = enabled() if force is None else bool(force)
-    profiler = Profiler() if on else NoopProfiler()
+    profiler = Profiler(MAX_EVENTS if maxlen is None else max(1, int(maxlen))) if on else NoopProfiler()
     mark = profiler.mark
     if on:
         log.info("glass profiling enabled (%s)", PROFILE_ENV)
