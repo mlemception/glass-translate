@@ -20,6 +20,7 @@ import importlib.util
 import random
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -100,48 +101,82 @@ def test_a_block_whose_reference_lookup_moved_is_not_eligible():
 
 
 # ------------------------------------------------------------- the floor test
-def _write_page(root: Path, page: str, kept: np.ndarray, orig_ink: np.ndarray) -> None:
+def _art(shift: int = 0) -> np.ndarray:
+    """Line art as grey (ink 0, paper 255): a lattice of 2 px strokes, rolled
+    ``shift`` px on both axes."""
+    img = np.full((200, 200), 255, np.uint8)
+    for x in range(10, 200, 23):
+        cv2.line(img, (x, 0), (x + 40, 199), 0, 2)
+    for y in range(7, 200, 29):
+        cv2.line(img, (0, y), (199, y + 15), 0, 2)
+    return np.roll(img, (shift, shift), axis=(0, 1))
+
+
+def _write(root: Path, page: str, ours: np.ndarray, ref: np.ndarray,
+           dark: np.ndarray | None = None) -> None:
+    """Our page, its aligned reference, and ``kept_art.png`` exactly as
+    ``typeset_reference`` writes it: ink on both pages, with the ink sense
+    inverted inside dark-paper windows."""
     (root / "reference" / page).mkdir(parents=True, exist_ok=True)
     (root / "pages").mkdir(parents=True, exist_ok=True)
-    Image.fromarray(np.where(kept, 255, 0).astype(np.uint8)).save(
+    Image.fromarray(ours).save(root / "pages" / f"{page}.png")
+    Image.fromarray(ref).save(root / "reference" / page / "eng_aligned.png")
+    ja_ink, eng_ink = ours < 128, ref < 128
+    if dark is not None:
+        ja_ink = np.where(dark, ours >= 128, ja_ink)
+        eng_ink = np.where(dark, ref >= 128, eng_ink)
+    Image.fromarray(((ja_ink & eng_ink) * 255).astype(np.uint8)).save(
         root / "reference" / page / "kept_art.png")
-    Image.fromarray(np.where(orig_ink, 0, 255).astype(np.uint8)).save(
-        root / "pages" / f"{page}.png")
 
 
-def test_a_page_whose_reference_does_not_register_is_dropped(tmp_path, monkeypatch):
-    """96.3 % of one real page's kept-art is not ink in our own original."""
+def test_a_reference_that_registers_is_kept(tmp_path, monkeypatch):
     monkeypatch.setattr(panel, "CORPUS", tmp_path)
-    kept = np.zeros((200, 200), bool)
-    kept[:60, :100] = True  # 6000 px of "kept art"
-    _write_page(tmp_path, "bad", kept, np.zeros((200, 200), bool))  # none of it is our ink
-    assert panel.registers("bad") is False
-
-
-def test_a_page_whose_reference_registers_is_kept(tmp_path, monkeypatch):
-    monkeypatch.setattr(panel, "CORPUS", tmp_path)
-    kept = np.zeros((200, 200), bool)
-    kept[:60, :100] = True
-    ink = kept.copy()
-    ink[:2, :10] = False  # a sliver missing is fine
-    _write_page(tmp_path, "good", kept, ink)
+    ours = _art()
+    ref = ours.copy()
+    ref[80:120, 60:140] = 255  # the lettering differs; the artwork does not
+    _write(tmp_path, "good", ours, ref)
     assert panel.registers("good") is True
 
 
-def test_a_page_with_almost_no_kept_art_is_kept(tmp_path, monkeypatch):
-    """A tiny denominator makes the floor meaningless, not damning.
-
-    Real pages divide by as few as 4 pixels; dropping them on a ratio computed
-    from that would discard good pages for noise.
-    """
+def test_a_few_pixels_of_misalignment_are_forgiven(tmp_path, monkeypatch):
     monkeypatch.setattr(panel, "CORPUS", tmp_path)
-    kept = np.zeros((200, 200), bool)
-    kept[0, :20] = True  # 20 px, far below FLOOR_MIN_KEPT
-    _write_page(tmp_path, "tiny", kept, np.zeros((200, 200), bool))
-    assert panel.registers("tiny") is True
+    _write(tmp_path, "nudged", _art(), _art(shift=2))
+    assert panel.registers("nudged") is True
 
 
-def test_a_page_with_no_kept_art_mask_at_all_is_kept(tmp_path, monkeypatch):
+def test_a_reference_of_different_content_is_dropped(tmp_path, monkeypatch):
+    """The failure the floor exists for: shown a reference that shares no
+    artwork with our page, a reviewer reports artifacts with confidence."""
+    monkeypatch.setattr(panel, "CORPUS", tmp_path)
+    other = np.full((200, 200), 255, np.uint8)
+    for r in range(8, 140, 17):
+        cv2.circle(other, (100, 100), r, 0, 2)
+    _write(tmp_path, "wrong", _art(), other)
+    assert panel.registers("wrong") is False
+
+
+def test_a_misaligned_reference_on_light_paper_is_dropped(tmp_path, monkeypatch):
+    """The kept-art ratio this replaced could never fail here: kept art is built
+    from our own ink, so on light paper it is our ink whatever the alignment."""
+    monkeypatch.setattr(panel, "CORPUS", tmp_path)
+    _write(tmp_path, "slipped", _art(), _art(shift=11))
+    assert panel.registers("slipped") is False
+
+
+def test_a_dark_paper_page_is_not_mistaken_for_a_misaligned_one(tmp_path, monkeypatch):
+    """A correctly aligned page with white lettering on a black caption box.
+    Its kept art there is LIGHT, and the kept-art ratio this replaced read every
+    light pixel as foreign ink - so it rejected the page, and every page like it."""
+    monkeypatch.setattr(panel, "CORPUS", tmp_path)
+    ours = _art()
+    dark = np.zeros(ours.shape, bool)
+    dark[40:160, 30:170] = True
+    ours[dark] = 255 - ours[dark]  # white strokes on a black box
+    _write(tmp_path, "dark", ours, ours.copy(), dark)
+    assert panel.registers("dark") is True
+
+
+def test_a_page_with_no_reference_at_all_is_kept(tmp_path, monkeypatch):
     monkeypatch.setattr(panel, "CORPUS", tmp_path)
     assert panel.registers("missing") is True
 
