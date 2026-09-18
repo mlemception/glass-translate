@@ -244,8 +244,14 @@ $CATALOG = @'
      "sha256": ""
     },
     {
-     "url": "https://huggingface.co/entai2965/sugoi-v4-ja-en-ctranslate2/resolve/main/shared_vocabulary.json",
-     "rel": "sugoi-v4-ja-en/shared_vocabulary.json",
+     "url": "https://huggingface.co/entai2965/sugoi-v4-ja-en-ctranslate2/resolve/main/source_vocabulary.json",
+     "rel": "sugoi-v4-ja-en/source_vocabulary.json",
+     "size": 0,
+     "sha256": ""
+    },
+    {
+     "url": "https://huggingface.co/entai2965/sugoi-v4-ja-en-ctranslate2/resolve/main/target_vocabulary.json",
+     "rel": "sugoi-v4-ja-en/target_vocabulary.json",
      "size": 0,
      "sha256": ""
     },

@@ -73,7 +73,10 @@ SUGOI_DIR_NAME = "sugoi-v4-ja-en"
 SUGOI_FILES = (
     "config.json",
     "model.bin",
-    "shared_vocabulary.json",
+    # The conversion keeps separate vocabularies; the repository has never held a
+    # shared_vocabulary.json, and asking for one is a 404 after the 1.1 GB model.bin.
+    "source_vocabulary.json",
+    "target_vocabulary.json",
     "spm/spm.ja.nopretok.model",
     "spm/spm.en.nopretok.model",
 )
