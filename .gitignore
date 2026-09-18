@@ -35,3 +35,7 @@ renderer/.venv/
 
 # Local working notes, like the other process docs in this repo. Never shipped.
 /docs/MANUAL_PROPOSALS.md
+
+# Dev-only side-products of tools/profile_glass.py: they carry absolute paths and the monitor name.
+*.summary.json
+*.qt-stderr.log
