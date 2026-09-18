@@ -178,6 +178,10 @@ BUBBLE_STRAY_INSIDE = 0.9
 LAYOUT_BOUND = True  # False reproduces the unbounded fill exactly
 BOUND_MARGIN_EM = 0.18  # the inset layout.py applies (_BUBBLE_MARGIN_EM); a test keeps them equal
 BOUND_LETTER_EM = 0.3  # the words: text and furigana boxes padded this many glyphs
+# ...and the lettering the OCR never boxed: a stray at least this many glyphs across in BOTH
+# directions is a glyph wherever it falls.  Thin strokes and tone dots stay behind the bound -
+# a hatching stroke is glyph-long but not glyph-wide.  Above GLYPH_MAX nothing is exempted.
+BOUND_GLYPH_MIN = 0.25
 # Low-confidence OCR lines as erase evidence (:func:`apply`).  Ruby is the
 # smallest, faintest thing on a page, so it is the first line the detector
 # loses to the confidence floor - 4ja returns ``めぐみ`` at 0.26 against a floor
@@ -944,7 +948,11 @@ def _analyse_bubble(ctx: _Ctx) -> _Analysis:
     erase = interior & zone.astype(bool) & ~_dilate(outline, OUTLINE_FRINGE)
     if ctx.bound is not None:
         words = _paint((h, w), ctx.main + ctx.furi, max(PAD, int(round(BOUND_LETTER_EM * max(ctx.glyph, 1.0)))))
-        erase &= ctx.bound | (words > 0)
+        allowed = ctx.bound | (words > 0)
+        glyphs = stray & (comps.mindim >= BOUND_GLYPH_MIN * max(ctx.glyph, 1.0))
+        if glyphs.any():
+            allowed |= _paint((h, w), comps.rects(glyphs), PAD) > 0
+        erase &= allowed
     kept = ink.astype(bool) & ~erase
     empty = np.zeros((h, w), dtype=bool)
     return _Analysis(erase, kept, empty, None)
