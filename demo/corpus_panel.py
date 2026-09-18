@@ -162,13 +162,22 @@ def select(hot: Sequence[dict], cold: Sequence[dict], rng: random.Random) -> Tup
     stable = [r for r in hot if r["from_reference"] == r["old_from_reference"]]
     chosen: List[dict] = []
     seen: set = set()
+    # Spread over pages first: the loudest block of each page, loudest first ...
     for r in stable:
-        if r["page"] in seen and len(seen) < MIN_PAGES:
-            continue  # spread over pages first, then take seconds
-        chosen.append({**r, "role": "affected"})
-        seen.add(r["page"])
         if len(chosen) == MIN_BLOCKS:
             break
+        if r["page"] not in seen:
+            chosen.append({**r, "role": "affected"})
+            seen.add(r["page"])
+    # ... then take seconds, loudest first.  A single pass that skipped a page's
+    # seconds while spreading never came back for them, so loud blocks clustered
+    # on a few pages were lost and the panel fell short though plenty had changed.
+    taken = {(c["page"], c["index"]) for c in chosen}
+    for r in stable:
+        if len(chosen) == MIN_BLOCKS:
+            break
+        if (r["page"], r["index"]) not in taken:
+            chosen.append({**r, "role": "affected"})
     controls = [c for c in cold if c["page"] in seen] or list(cold)
     for c in rng.sample(controls, min(CONTROLS, len(controls))):
         chosen.append({**c, "role": "control"})

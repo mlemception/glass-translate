@@ -93,6 +93,21 @@ def test_selection_spreads_over_pages_before_taking_seconds():
     assert sum(1 for c in chosen if c["page"] == "loud") < len(chosen)
 
 
+def test_seconds_skipped_while_spreading_are_taken_once_the_pages_are_covered():
+    """Loud blocks cluster: here two pages hold eight of them and two quieter
+    pages come last.  Spreading first must not throw the loud seconds away - a
+    single pass skipped them and never came back, leaving a panel of four that
+    decided nothing although ten blocks had changed."""
+    hot = [_rec("a", i, diff=1000 - i) for i in range(4)]
+    hot += [_rec("b", i, diff=900 - i) for i in range(4)]
+    hot += [_rec("c", 0, diff=50), _rec("d", 0, diff=40)]
+    chosen, seen = panel.select(hot, [], random.Random(0))
+    affected = [c for c in chosen if c["role"] == "affected"]
+    assert len(affected) == panel.MIN_BLOCKS
+    assert seen == {"a", "b", "c", "d"}
+    assert len({(c["page"], c["index"]) for c in affected}) == len(affected)  # no block twice
+
+
 def test_a_block_whose_reference_lookup_moved_is_not_eligible():
     """Block grouping wobbles ~2 in 316; that text change is not the slice."""
     wobbled = {**_rec("p1", 0), "from_reference": True, "old_from_reference": False}
