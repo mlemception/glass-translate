@@ -714,8 +714,8 @@ def typeset(
     word) beats one with them, even if it needs more lines; and a layout
     with hyphens at one size is only kept when no size a little smaller sets
     the text with fewer of them: every hyphen counts as ``_HYPHEN_SIZE_COST``
-    of the size (so one hyphen still beats one ``_SIZE_STEP`` step, three do
-    not).  Arbitrary splits of a word wider than the region are only tried
+    of the size, about 1.4 ``_SIZE_STEP`` steps - so a hyphen-free layout one
+    step smaller beats one with a hyphen, and two hyphens lose to three steps.  Arbitrary splits of a word wider than the region are only tried
     once the size has fallen to ``_FORCE_SPLIT_SCALE`` of ``max_size``.  When
     nothing fits even at ``min_size`` the text is flowed at ``min_size``
     through a rectangle as wide as the widest span (``fitted=False``), so a
