@@ -42,6 +42,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -58,9 +59,12 @@ MIN_BLOCKS = 6
 MIN_PAGES = 4
 CONTROLS = 2
 
-# A page whose kept-art mask is this far from our own ink is not comparable.
-FLOOR = 0.10
-FLOOR_MIN_KEPT = 2000
+# A page whose aligned reference does not share its ink with ours is not comparable.
+# Over the 50 gate pages and 50 deliberately wrong pairings of the same size, a wrong
+# pairing reaches at most 0.666 on this overlap and a correct one at least 0.778, save one
+# page that is genuinely misaligned (0.637, alignment score 0.479); the floor sits in the gap.
+MIN_OVERLAP = 0.72
+OVERLAP_TOL = 3  # px of misalignment the overlap forgives
 
 
 def blocks(page: str, tag: str) -> dict:
@@ -71,29 +75,40 @@ def render(page: str, tag: str) -> Image.Image:
     return Image.open(CORPUS / "renders" / page / f"{tag}_typeset.png").convert("L")
 
 
+def ink_overlap(a: np.ndarray, b: np.ndarray, tol: int = OVERLAP_TOL) -> float:
+    """Of each mask's pixels, the fraction lying within ``tol`` px of the
+    other's, averaged both ways."""
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * tol + 1, 2 * tol + 1))
+    ad = cv2.dilate(a.astype(np.uint8), k).astype(bool)
+    bd = cv2.dilate(b.astype(np.uint8), k).astype(bool)
+    return 0.5 * (int((a & bd).sum()) / int(a.sum()) + int((b & ad).sum()) / int(b.sum()))
+
+
 def registers(page: str) -> bool:
     """Whether this page's reference actually corresponds to our page.
 
     Each strip carries ``eng_aligned.png`` beside it as the ground truth.  On a
     page whose reference does not register, the reviewer compares our render
-    against *different content* and reports artifacts with confidence.  It did
-    exactly that on a 1200x764 half-page whose reference is a 2250x1500 page
-    scaled 0.534 onto it: **96.3 %** of that page's kept-art is not ink in our
-    own original.
+    against *different content* and reports artifacts with confidence.  The
+    stored alignment score does not catch that, so the floor is measured
+    directly: the ink the two pages share.  The lettering differs between them
+    and the artwork does not, and artwork dominates a page.
 
-    The stored alignment score does **not** catch this - that page scores 0.894,
-    better than pages that register fine - so the floor is measured directly,
-    measured directly.
+    It used to compare ``kept_art.png`` against our own ink, which cannot work.
+    ``typeset_reference`` builds kept art FROM our page's ink, so on light paper
+    it is our ink whatever the alignment, and on dark paper it inverts the ink
+    sense.  The old ratio was therefore exactly the share of kept art lying in
+    dark-paper windows - correlation 1.000 over the 50 gate pages - so it
+    rejected every page with dark-paper text and admitted a misaligned one.
     """
     try:
-        kept = np.asarray(Image.open(CORPUS / "reference" / page / "kept_art.png").convert("L")) > 127
-        orig = np.asarray(Image.open(CORPUS / "pages" / f"{page}.png").convert("L")) < 128
+        ours = np.asarray(Image.open(CORPUS / "pages" / f"{page}.png").convert("L")) < 128
+        ref = np.asarray(Image.open(CORPUS / "reference" / page / "eng_aligned.png").convert("L")) < 128
     except OSError:
         return True  # nothing to test the floor with; leave the page in
-    n = int(kept.sum())
-    if kept.shape != orig.shape or n < FLOOR_MIN_KEPT:
-        return True  # too little kept art for the floor to mean anything
-    return float((kept & ~orig).sum()) / n < FLOOR
+    if ours.shape != ref.shape or not ours.any() or not ref.any():
+        return True
+    return bool(ink_overlap(ours, ref) >= MIN_OVERLAP)
 
 
 def pages(tag: str) -> List[str]:
