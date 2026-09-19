@@ -181,6 +181,164 @@ def test_grabber_records_grab_events(profiling_on, monkeypatch: pytest.MonkeyPat
     assert (grabs[0]["x"], grabs[0]["y"]) == (50, 60) and grabs[0]["ms"] >= 0.0
 
 
+# ------------------------------------------------------------------------- cap and spans
+def test_eviction_is_counted_and_reset_by_clear(profiling_on) -> None:
+    """A full deque silently dropped the oldest events; ``dropped`` makes that visible."""
+    prof = P.Profiler(maxlen=4)
+    assert prof.capacity == 4 and prof.dropped == 0
+    for i in range(4):
+        prof.mark("swap", i=i)
+    assert prof.dropped == 0 and len(prof.events()) == 4
+    for i in range(3):
+        prof.mark("swap", i=100 + i)
+    assert prof.dropped == 3 and len(prof.events()) == 4
+    summary = prof.summary()
+    assert summary["dropped"] == 3 and summary["capacity"] == 4
+    prof.clear()
+    assert prof.dropped == 0 and prof.events() == []
+    assert prof.summary()["dropped"] == 0
+
+
+def test_install_passes_the_capacity_through(profiling_on) -> None:
+    try:
+        prof = P.install(force=True, maxlen=7)
+        assert isinstance(prof, P.Profiler) and prof.capacity == 7
+        assert P.install(force=True).capacity == P.MAX_EVENTS  # the in-app default is unchanged
+        off = P.install(force=False, maxlen=7)
+        assert isinstance(off, P.NoopProfiler) and not isinstance(off, P.Profiler)
+        assert off.capacity == 0 and off.dropped == 0
+    finally:
+        P.install(force=True)
+
+
+@pytest.mark.parametrize("maxlen", [0, -5])
+def test_a_capacity_below_one_is_clamped(profiling_on, maxlen: int) -> None:
+    """A deque with maxlen 0 records nothing at all; one event is the floor."""
+    assert P.Profiler(maxlen=maxlen).capacity == 1
+    try:
+        prof = P.install(force=True, maxlen=maxlen)
+        assert prof.capacity == 1
+        prof.mark("swap")
+        assert len(prof.events()) == 1
+    finally:
+        P.install(force=True)
+
+
+def test_begin_end_records_a_span_with_its_payload(profiling_on) -> None:
+    prof = profiling_on
+    t0 = prof.begin()
+    assert t0 > 0.0
+    prof.end("overlay_apply_ms", t0, blocks=3, fresh=2)
+    (_t, kind, payload), = prof.events()
+    assert kind == "overlay_apply_ms" and payload["blocks"] == 3 and payload["fresh"] == 2
+    assert payload["ms"] >= 0.0
+    assert prof.summary()["ms"]["overlay_apply_ms"]["n"] == 1
+
+
+def test_begin_end_is_a_noop_when_profiling_is_off(profiling_off) -> None:
+    prof = profiling_off
+    assert prof.begin() == 0.0
+    prof.end("overlay_apply_ms", 0.0, blocks=1, fresh=1)
+    prof.end("paint_ms", prof.begin())
+    assert prof.events() == []
+
+
+# ------------------------------------------------------------------------------- overlay
+def _overlay_with_block(text: str = "HELLO THERE FRIEND"):
+    """A 400x300 glass overlay plus one block segment (the helper of test_overlay_cache)."""
+    from glasstranslate.ui import overlay as O
+
+    from tests.test_overlay_cache import _block_segment
+
+    glass = O.GlassOverlay()
+    glass.setGeometry(0, 0, 400, 300)
+    return glass, _block_segment(text, 60)
+
+
+def _rendered_bytes(glass, seg) -> bytes:
+    glass._apply_segments([seg])
+    image = glass.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    return bytes(image.constBits())
+
+
+def test_overlay_marks_nothing_when_profiling_is_off(profiling_off) -> None:
+    glass, seg = _overlay_with_block()
+    try:
+        assert len(_rendered_bytes(glass, seg)) > 0
+    finally:
+        glass.deleteLater()
+    assert profiling_off.events() == []
+
+
+def test_overlay_marks_apply_typeset_layer_and_paint(profiling_on) -> None:
+    prof = profiling_on
+    glass, seg = _overlay_with_block()
+    try:
+        glass._apply_segments([seg])
+        applies = [p for _t, k, p in prof.events() if k == "overlay_apply_ms"]
+        assert len(applies) == 1 and applies[0]["blocks"] == 1 and applies[0]["fresh"] == 1
+        assert applies[0]["ms"] >= 0.0
+        glass.grab()
+        kinds = [k for _t, k, _p in prof.events()]
+        assert kinds.count("overlay_apply_ms") == 1
+        assert kinds.count("overlay_typeset_ms") >= 1 and kinds.count("overlay_layer_ms") >= 1
+        assert kinds.count("paint_ms") >= 1
+        counted = (kinds.count("overlay_typeset_ms"), kinds.count("overlay_layer_ms"), kinds.count("paint_ms"))
+        glass.grab()  # the layout and the lettering layer are cached: only the paint repeats
+        kinds = [k for _t, k, _p in prof.events()]
+        assert (kinds.count("overlay_typeset_ms"), kinds.count("overlay_layer_ms")) == counted[:2]
+        assert kinds.count("paint_ms") > counted[2]
+        prof.clear()
+        glass._apply_segments([seg])  # the very same object: nothing is fresh
+        applies = [p for _t, k, p in prof.events() if k == "overlay_apply_ms"]
+        assert len(applies) == 1 and (applies[0]["blocks"], applies[0]["fresh"]) == (1, 0)
+    finally:
+        glass.deleteLater()
+
+
+def test_overlay_paints_the_same_pixels_with_and_without_profiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    def rendered() -> bytes:
+        glass, seg = _overlay_with_block()
+        try:
+            return _rendered_bytes(glass, seg)
+        finally:
+            glass.deleteLater()
+
+    try:
+        monkeypatch.delenv(P.PROFILE_ENV, raising=False)
+        P.install()
+        off = rendered()
+        monkeypatch.setenv(P.PROFILE_ENV, "1")
+        P.install()
+        on = rendered()
+    finally:  # a failed assertion must not leak a live recorder into the next test
+        monkeypatch.delenv(P.PROFILE_ENV, raising=False)
+        P.install()
+    assert len(off) > 0 and on == off
+
+
+def test_a_failing_typeset_still_paints_and_only_loses_its_mark(
+    profiling_on, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_paint_block``'s per-block ``except`` keeps the glass alive; the open span is dropped."""
+    from glasstranslate.ui import overlay as O
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("typeset exploded")
+
+    glass, seg = _overlay_with_block()
+    try:
+        glass._apply_segments([seg])
+        monkeypatch.setattr(O, "typeset_block", boom)
+        profiling_on.clear()
+        assert len(glass.grab().toImage().constBits()) > 0  # the window still produced pixels
+        kinds = [k for _t, k, _p in profiling_on.events()]
+        assert kinds.count("paint_ms") == 1  # the paint finished and was measured
+        assert "overlay_typeset_ms" not in kinds and "overlay_layer_ms" not in kinds
+    finally:
+        glass.deleteLater()
+
+
 # ------------------------------------------------------------------------------- summary
 def test_summary_percentiles(profiling_on) -> None:
     prof = profiling_on
